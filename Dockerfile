@@ -14,10 +14,12 @@ ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /app
 
-# Copy configuration and package files
-COPY package*.json tsconfig.json ./
+# Explicitly copy configuration files individually
+COPY package.json ./
+COPY package-lock.json ./
+COPY tsconfig.json ./
 
-# Install dependencies
+# Run clean install
 RUN npm ci
 
 # Copy application source code
