@@ -3,7 +3,7 @@ import type { Request, Response } from "express";
 import * as dotenv from "dotenv";
 import { exec } from "child_process";
 import { promisify } from "util";
-import * as fs from "fs/promises";
+import * as fsPromises from "fs/promises";
 import * as path from "path";
 import { Mppx } from "@okxweb3/mpp";
 import { charge } from "@okxweb3/mpp/evm/server";
@@ -49,8 +49,14 @@ interface VerifyBody {
   };
 }
 
+app.get("/health", (req: Request, res: Response) => {
+  return res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() });
+});
+
 app.post("/api/v1/verify", async (req: Request, res: Response) => {
-  // Convert Express request to standard Web Fetch Request for MPP compatibility
+  console.log(`\n--- [INCOMING REQUEST] ${new Date().toISOString()} ---`);
+  console.log(`Target Agent ID: ${req.body?.targetAgentId || "None"}`);
+
   const protocol = req.secure ? "https" : "http";
   const fullUrl = `${protocol}://${req.headers.host}${req.url}`;
   const webHeaders = new Headers();
@@ -64,16 +70,20 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
     body: req.method !== "GET" && req.method !== "HEAD" ? JSON.stringify(req.body) : undefined,
   });
 
+  console.log("[Layer 1] Validating OKX MPP Protocol payment gates...");
   const result = await mppx.charge(CHARGE_CONFIG)(webRequest);
   
   if (result.status === 402) {
+    console.log("[Layer 1 Blocked] Payment token challenge required (402).");
     return res.status(402)
       .set("WWW-Authenticate", result.challenge.headers.get("WWW-Authenticate")!)
       .json();
   }
+  console.log("[Layer 1 Verified] On-chain monetization checks cleared.");
 
   const { targetAgentId, jobId, fileKey, expectedSchema, transactionPayload } = req.body as VerifyBody;
   if (!targetAgentId) {
+    console.log("[Request Rejected] Missing mandatory targetAgentId parameter.");
     return res.status(400).json({ error: "missing_parameter: targetAgentId" });
   }
 
@@ -81,6 +91,7 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
     let verdict = "PASS";
     const flags: string[] = [];
 
+    console.log(`[Layer 2] Auditing identity and active disputes for agent: ${targetAgentId}`);
     const profileCmd = `onchainos agent profile ${targetAgentId} --chain xlayer`;
     const tasksCmd = `onchainos agent task-in-progress --agent-ids ${targetAgentId} --chain xlayer`;
 
@@ -95,6 +106,7 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
     if (!profileResult || !profileResult.ok) {
       verdict = "BLOCK";
       flags.push("unregistered_or_invalid_agent_identity");
+      console.log("   ↳ FLAG added: Identity unregistered or invalid.");
     }
 
     if (tasksResult && tasksResult.data) {
@@ -102,10 +114,12 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
       if (activeDisputes.length > 0) {
         verdict = "CAUTION";
         flags.push(`active_disputes_detected: ${activeDisputes.length}`);
+        console.log(`   ↳ FLAG added: Detected ${activeDisputes.length} active registry disputes.`);
       }
     }
 
     if (transactionPayload && verdict !== "BLOCK") {
+      console.log("[Layer 3] Simulating smart contract execution payload...");
       const { to, data, value } = transactionPayload;
       const simFrom = profileResult?.data?.agentWalletAddress || "0x0000000000000000000000000000000000000000";
       const simCmd = `onchainos gateway simulate --from ${simFrom} --to ${to} --data ${data} --value ${value} --chain xlayer`;
@@ -115,12 +129,16 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
       if (simResult && simResult.error) {
         verdict = "BLOCK";
         flags.push(`simulation_reverted: ${simResult.error.message || "unknown_revert"}`);
+        console.log(`   ↳ FLAG added: Blockchain simulation failed. Revert message: ${simResult.error.message}`);
+      } else {
+        console.log("   ↳ Simulation successful. Transaction paths stable.");
       }
     }
 
     if (jobId && fileKey && verdict !== "BLOCK") {
+      console.log(`[Layer 4] Securing and validating deliverable assets for Job: ${jobId}`);
       const downloadDir = path.join(process.cwd(), "downloads");
-      await fs.mkdir(downloadDir, { recursive: true });
+      await fsPromises.mkdir(downloadDir, { recursive: true });
       const targetPath = path.join(downloadDir, `${jobId}_output.dat`);
 
       const downloadCmd = `onchainos agent file-download --file-key ${fileKey} --agent-id ${targetAgentId} --output ${targetPath}`;
@@ -129,13 +147,14 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
       if (!downloadSuccess) {
         if (verdict !== "BLOCK") verdict = "CAUTION";
         flags.push("deliverable_download_failed_or_key_invalid");
+        console.log("   ↳ FLAG added: Download failed. File key or permissions invalid.");
       } else {
         const mimeCmd = `file --mime-type -b ${targetPath}`;
         const mimeType = await execAsync(mimeCmd).then(r => r.stdout.trim()).catch(() => "unknown/binary");
 
         if (expectedSchema) {
           try {
-            const rawContent = await fs.readFile(targetPath, "utf-8");
+            const rawContent = await fsPromises.readFile(targetPath, "utf-8");
             const parsedJson = JSON.parse(rawContent);
             const parsedSchema = JSON.parse(expectedSchema);
             
@@ -143,18 +162,19 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
               if (!(key in parsedJson)) {
                 if (verdict !== "BLOCK") verdict = "CAUTION";
                 flags.push(`schema_violation: missing_expected_key_${key}`);
+                console.log(`   ↳ SCHEMA VIOLATION: Missing structured key: "${key}"`);
               }
             }
           } catch {
             if (verdict !== "BLOCK") verdict = "CAUTION";
             flags.push(`schema_violation: output_is_not_valid_json_but_schema_was_provided (Detected MIME: ${mimeType})`);
+            console.log(`   ↳ SCHEMA VIOLATION: Output format unparsable. Detected MIME: ${mimeType}`);
           }
         }
-        await fs.unlink(targetPath).catch(() => null);
+        await fsPromises.unlink(targetPath).catch(() => null);
       }
     }
 
-    // Prepare JSON payload and append the required Payment-Receipt proof headers
     const businessData = {
       verdict,
       targetAgentId,
@@ -162,12 +182,15 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
       flags,
     };
 
+    console.log(`[Evaluation Finalized] Result: [${verdict}] with ${flags.length} warning flag(s).\n`);
+
     const webResponse = new globalThis.Response(JSON.stringify(businessData), { status: 200 });
     const finalizedResponse = result.withReceipt(webResponse);
 
     finalizedResponse.headers.forEach((v, k) => res.setHeader(k, v));
     return res.json(businessData);
   } catch (err: any) {
+    console.log(`[Internal Failure] Application error: ${err.message}`);
     return res.status(500).json({ error: "internal_system_error", message: err.message });
   }
 });
