@@ -109,7 +109,16 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   const result = await mppx.charge(CHARGE_CONFIG)(webRequest);
   
   if (result.status === 402) {
-    console.log("[Layer 1 Blocked] Payment token challenge required (402).");
+    // Resolve the internal stream body into plain text before parsing the JSON metrics
+    const challengeText = result.challenge ? await result.challenge.text() : "";
+    const rawError = challengeText ? JSON.parse(challengeText)?.error : null;
+    
+    if (rawError) {
+      console.log(`[Layer 1 REJECTED] Raw Billing Gateway Issue: [${rawError.toUpperCase()}]`);
+    } else {
+      console.log("[Layer 1 Challenge Issued] Fresh payment token challenge generated (402).");
+    }
+
     return res.status(402)
       .set("WWW-Authenticate", result.challenge.headers.get("WWW-Authenticate")!)
       .json();
