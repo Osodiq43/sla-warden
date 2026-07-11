@@ -46,7 +46,6 @@ interface VerifyBody {
   };
 }
 
-// Helper to interact with OpenRouter for Layer 3 sentiment analysis
 async function analyzeReviewsWithAI(reviewsText: string): Promise<string> {
   if (!process.env.OPENROUTER_API_KEY) {
     console.log("   ↳ [AI Warning] OPENROUTER_API_KEY missing, defaulting sentiment to neutral.");
@@ -92,8 +91,7 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   console.log(`\n--- [INCOMING REQUEST] ${new Date().toISOString()} ---`);
   console.log(`Target Agent ID: ${req.body?.targetAgentId || "None"}`);
 
-  const protocol = req.secure ? "https" : "http";
-  const fullUrl = `${protocol}://${req.headers.host}${req.url}`;
+  const fullUrl = `https://sla-warden.onrender.com/api/v1/verify`;
   const webHeaders = new Headers();
   Object.entries(req.headers).forEach(([k, v]) => {
     if (v) webHeaders.append(k, Array.isArray(v) ? v.join(", ") : v);
@@ -109,7 +107,6 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   const result = await mppx.charge(CHARGE_CONFIG)(webRequest);
   
   if (result.status === 402) {
-    // Resolve the internal stream body into plain text before parsing the JSON metrics
     const challengeText = result.challenge ? await result.challenge.text() : "";
     const rawError = challengeText ? JSON.parse(challengeText)?.error : null;
     
@@ -184,7 +181,6 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
           flags.push("unproven_agent_zero_reviews");
           console.log("   ↳ CAUTION added: Unproven agent asset profile with zero history.");
         } else {
-          // Compile comments to pass through the hybrid AI sentiment parser
           const reviewComments = (feedbackResult.data.list || [])
             .map((r: any) => r.content || "")
             .filter((c: string) => c.length > 0)
