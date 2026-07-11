@@ -28,7 +28,7 @@ const mppx = Mppx.create({
 });
 
 const CHARGE_CONFIG = {
-  amount: "20000", 
+  amount: "0", 
   currency: "0x779ded0c9e1022225f8e0630b35a9b54be713736", 
   recipient: "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291", 
   description: "SLA-Warden Comprehensive Compliance Evaluation",
