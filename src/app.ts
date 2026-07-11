@@ -107,14 +107,19 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   const result = await mppx.charge(CHARGE_CONFIG)(webRequest);
   
   if (result.status === 402) {
-    const challengeText = result.challenge ? await result.challenge.text() : "";
-    const rawError = challengeText ? JSON.parse(challengeText)?.error : null;
-    
-    if (rawError) {
-      console.log(`[Layer 1 REJECTED] Raw Billing Gateway Issue: [${rawError.toUpperCase()}]`);
-    } else {
-      console.log("[Layer 1 Challenge Issued] Fresh payment token challenge generated (402).");
-    }
+  console.log(`[Layer 1 DEBUG] Incoming PAYMENT-SIGNATURE header present: ${!!req.headers["payment-signature"]}`);
+  if (req.headers["payment-signature"]) {
+    console.log(`[Layer 1 DEBUG] Header value (first 80 chars): ${String(req.headers["payment-signature"]).slice(0, 80)}...`);
+  }
+  const challengeText = result.challenge ? await result.challenge.text() : "";
+  console.log(`[Layer 1 DEBUG] Full challenge response body: ${challengeText}`);
+  const rawError = challengeText ? JSON.parse(challengeText || "{}")?.error : null;
+  
+  if (rawError) {
+    console.log(`[Layer 1 REJECTED] Raw Billing Gateway Issue: [${rawError.toUpperCase()}]`);
+  } else {
+    console.log("[Layer 1 Challenge Issued] Fresh payment token challenge generated (402).");
+  }
 
     return res.status(402)
       .set("WWW-Authenticate", result.challenge.headers.get("WWW-Authenticate")!)
