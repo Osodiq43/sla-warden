@@ -19,6 +19,20 @@ const saClient = new SaApiClient({
   apiKey: process.env.OKX_API_KEY!,
   secretKey: process.env.OKX_SECRET_KEY!,
   passphrase: process.env.OKX_PASSPHRASE!,
+  // This is the missing piece: SaApiClient swallows business-level errors
+  // (HTTP 200 but internal error code != 0) unless you hook onError.
+  // Without this, mppx.charge() just reports a generic 402 with no reason.
+  onError: (info) => {
+    console.log(`\n[SA API ERROR] ==========================================`);
+    console.log(`[SA API ERROR] method: ${info.method}`);
+    console.log(`[SA API ERROR] path: ${info.path}`);
+    console.log(`[SA API ERROR] httpStatus: ${info.httpStatus}`);
+    console.log(`[SA API ERROR] code: ${info.code}`);
+    console.log(`[SA API ERROR] msg: ${info.msg}`);
+    console.log(`[SA API ERROR] requestBody: ${info.requestBody}`);
+    console.log(`[SA API ERROR] responseBody: ${info.responseBody}`);
+    console.log(`[SA API ERROR] ==========================================\n`);
+  },
 });
 
 const mppx = Mppx.create({
@@ -28,11 +42,11 @@ const mppx = Mppx.create({
 });
 
 const CHARGE_CONFIG = {
-  amount: "0", 
-  currency: "0x9e29b3aada05bf2d2c827af80bd28dc0b9b4fb0c",  // ← changed: testnet USD₮0
-  recipient: "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291", 
+  amount: "0",
+  currency: "0x9e29b3aada05bf2d2c827af80bd28dc0b9b4fb0c", // testnet USD₮0
+  recipient: "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291",
   description: "SLA-Warden Comprehensive Compliance Evaluation",
-  methodDetails: { chainId: 1952, feePayer: true },  // ← changed: testnet chain
+  methodDetails: { chainId: 1952, feePayer: true }, // testnet
 };
 
 interface VerifyBody {
@@ -105,21 +119,21 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
 
   console.log("[Layer 1] Validating OKX MPP Protocol payment gates...");
   const result = await mppx.charge(CHARGE_CONFIG)(webRequest);
-  
+
   if (result.status === 402) {
-  console.log(`[Layer 1 DEBUG] Incoming PAYMENT-SIGNATURE header present: ${!!req.headers["payment-signature"]}`);
-  if (req.headers["payment-signature"]) {
-    console.log(`[Layer 1 DEBUG] Header value (first 80 chars): ${String(req.headers["payment-signature"]).slice(0, 80)}...`);
-  }
-  const challengeText = result.challenge ? await result.challenge.text() : "";
-  console.log(`[Layer 1 DEBUG] Full challenge response body: ${challengeText}`);
-  const rawError = challengeText ? JSON.parse(challengeText || "{}")?.error : null;
-  
-  if (rawError) {
-    console.log(`[Layer 1 REJECTED] Raw Billing Gateway Issue: [${rawError.toUpperCase()}]`);
-  } else {
-    console.log("[Layer 1 Challenge Issued] Fresh payment token challenge generated (402).");
-  }
+    console.log(`[Layer 1 DEBUG] Incoming PAYMENT-SIGNATURE header present: ${!!req.headers["payment-signature"]}`);
+    if (req.headers["payment-signature"]) {
+      console.log(`[Layer 1 DEBUG] Header value (first 80 chars): ${String(req.headers["payment-signature"]).slice(0, 80)}...`);
+    }
+    const challengeText = result.challenge ? await result.challenge.text() : "";
+    console.log(`[Layer 1 DEBUG] Full challenge response body: ${challengeText}`);
+    const rawError = challengeText ? JSON.parse(challengeText || "{}")?.error : null;
+
+    if (rawError) {
+      console.log(`[Layer 1 REJECTED] Raw Billing Gateway Issue: [${rawError.toUpperCase()}]`);
+    } else {
+      console.log("[Layer 1 Challenge Issued] Fresh payment token challenge generated (402). See [SA API ERROR] block above (if any) for the real reason.");
+    }
 
     return res.status(402)
       .set("WWW-Authenticate", result.challenge.headers.get("WWW-Authenticate")!)
@@ -195,7 +209,7 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
             console.log("   ↳ Invoking hybrid AI layer to parse review narrative logs...");
             const aiSignal = await analyzeReviewsWithAI(reviewComments);
             summaryChecks.reputation.aiSignal = aiSignal;
-            
+
             if (aiSignal === "negative") {
               if (verdict !== "BLOCK") verdict = "CAUTION";
               flags.push("llm_extracted_critical_reliability_concerns");
@@ -215,8 +229,8 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
       const serviceRaw = await execAsync(serviceCmd).catch((e) => e);
       const serviceResult = serviceRaw?.stdout ? extractJsonFromStdout(serviceRaw.stdout) : null;
 
-      const registeredServices = serviceResult?.ok && serviceResult?.data?.[0]?.list 
-        ? serviceResult.data[0].list 
+      const registeredServices = serviceResult?.ok && serviceResult?.data?.[0]?.list
+        ? serviceResult.data[0].list
         : [];
 
       if (registeredServices.length === 0) {
