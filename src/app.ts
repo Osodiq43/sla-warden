@@ -19,9 +19,7 @@ const saClient = new SaApiClient({
   apiKey: process.env.OKX_API_KEY!,
   secretKey: process.env.OKX_SECRET_KEY!,
   passphrase: process.env.OKX_PASSPHRASE!,
-  // This is the missing piece: SaApiClient swallows business-level errors
-  // (HTTP 200 but internal error code != 0) unless you hook onError.
-  // Without this, mppx.charge() just reports a generic 402 with no reason.
+  // Expose business-level exceptions cleanly if the protocol layer encounters validation barriers
   onError: (info) => {
     console.log(`\n[SA API ERROR] ==========================================`);
     console.log(`[SA API ERROR] method: ${info.method}`);
@@ -41,12 +39,13 @@ const mppx = Mppx.create({
   secretKey: process.env.MPP_SECRET_KEY!,
 });
 
+// Enforce strict EIP-55 mixed-case checksum formatting to pass library validation parameters
 const CHARGE_CONFIG = {
   amount: "0",
-  currency: "0x9e29b3aada05bf2d2c827af80bd28dc0b9b4fb0c", // testnet USD₮0
-  recipient: "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291",
+  currency: "0x779DeD0C9E1022225F8E0630b35a9b54bE713736", // Checksummed Mainnet USDT
+  recipient: "0xeded37A75f0E0fcFb2F9C84dBbC6C98bf4DC8291", // Checksummed Primary Payee
   description: "SLA-Warden Comprehensive Compliance Evaluation",
-  methodDetails: { chainId: 1952, feePayer: true }, // testnet
+  methodDetails: { chainId: 196, feePayer: true }, // Mainnet X Layer
 };
 
 interface VerifyBody {
@@ -60,6 +59,7 @@ interface VerifyBody {
   };
 }
 
+// Helper to interact with OpenRouter for Layer 3 sentiment analysis
 async function analyzeReviewsWithAI(reviewsText: string): Promise<string> {
   if (!process.env.OPENROUTER_API_KEY) {
     console.log("   ↳ [AI Warning] OPENROUTER_API_KEY missing, defaulting sentiment to neutral.");
@@ -110,6 +110,14 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   Object.entries(req.headers).forEach(([k, v]) => {
     if (v) webHeaders.append(k, Array.isArray(v) ? v.join(", ") : v);
   });
+
+  // Intercept incoming token streams and map them cleanly to satisfy the internal HTTP header check
+  const rawSig = req.headers["payment-signature"];
+  if (rawSig && !req.headers["authorization"]) {
+    const formattedSig = String(rawSig).startsWith("Payment ") ? String(rawSig) : `Payment ${rawSig}`;
+    webHeaders.append("authorization", formattedSig);
+    console.log("[Layer 1 DEBUG] Remapped payment-signature header safely onto webRequest Authorization context.");
+  }
 
   const webRequest = new globalThis.Request(fullUrl, {
     method: req.method,
