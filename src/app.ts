@@ -39,13 +39,12 @@ const mppx = Mppx.create({
   secretKey: process.env.MPP_SECRET_KEY!,
 });
 
-// Enforce strict EIP-55 mixed-case checksum formatting to pass library validation parameters
 const CHARGE_CONFIG = {
   amount: "0",
-  currency: "0x779DeD0C9E1022225F8E0630b35a9b54bE713736", // Checksummed Mainnet USDT
-  recipient: "0xeded37A75f0E0fcFb2F9C84dBbC6C98bf4DC8291", // Checksummed Primary Payee
+  currency: "0x779ded0c9e1022225f8e0630b35a9b54be713736", 
+  recipient: "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291", 
   description: "SLA-Warden Comprehensive Compliance Evaluation",
-  methodDetails: { chainId: 196, feePayer: true }, // Mainnet X Layer
+  methodDetails: { chainId: 196, feePayer: true }, 
 };
 
 interface VerifyBody {
