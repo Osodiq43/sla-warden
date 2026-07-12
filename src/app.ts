@@ -29,10 +29,10 @@ const mppx = Mppx.create({
 
 const CHARGE_CONFIG = {
   amount: "0", 
-  currency: "0x779ded0c9e1022225f8e0630b35a9b54be713736", 
+  currency: "0x9e29b3aada05bf2d2c827af80bd28dc0b9b4fb0c",  // ← changed: testnet USD₮0
   recipient: "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291", 
   description: "SLA-Warden Comprehensive Compliance Evaluation",
-  methodDetails: { chainId: 196, feePayer: true },
+  methodDetails: { chainId: 1952, feePayer: true },  // ← changed: testnet chain
 };
 
 interface VerifyBody {
