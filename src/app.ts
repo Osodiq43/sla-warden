@@ -109,41 +109,49 @@ async function analyzeReviewsWithAI(reviewsText: string): Promise<{ signal: stri
   console.log(`   -> [AI DIAGNOSTIC] Review text being sent (first 200 chars): ${reviewsText.slice(0, 200)}`);
 
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "meta-llama/llama-3-8b-instruct:free",
-        messages: [
-          {
-            role: "system",
-            content: "You are a risk audit intelligence module. Analyze the following text reviews for an AI agent. Classify the cumulative user sentiment/reliability experience into exactly one of these tokens: positive, negative, or neutral. Return only the token word."
-          },
-          { role: "user", content: reviewsText }
-        ]
-      })
-    });
+    const modelsToTry = [
+      "meta-llama/llama-3.3-70b-instruct:free",
+      "openrouter/free", // auto-router fallback if the primary free model is rotated out
+    ];
+    let lastError = "";
 
-    console.log(`   -> [AI DIAGNOSTIC] OpenRouter HTTP status: ${response.status}`);
-    const aiData = await response.json();
+    for (const model of modelsToTry) {
+      console.log(`   -> [AI DIAGNOSTIC] Trying model: ${model}`);
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "system",
+              content: "You are a risk audit intelligence module. Analyze the following text reviews for an AI agent. Classify the cumulative user sentiment/reliability experience into exactly one of these tokens: positive, negative, or neutral. Return only the token word."
+            },
+            { role: "user", content: reviewsText }
+          ]
+        })
+      });
 
-    if (!response.ok) {
-      console.log(`   -> [AI DIAGNOSTIC] OpenRouter returned an error body: ${JSON.stringify(aiData).slice(0, 500)}`);
-      return { signal: "neutral", source: `api_error_status_${response.status}` };
+      console.log(`   -> [AI DIAGNOSTIC] Model ${model} HTTP status: ${response.status}`);
+      const aiData = await response.json();
+
+      if (!response.ok) {
+        lastError = `api_error_status_${response.status}_model_${model}`;
+        console.log(`   -> [AI DIAGNOSTIC] ${model} failed: ${JSON.stringify(aiData).slice(0, 300)}`);
+        continue; // try next model
+      }
+
+      const rawContent = aiData?.choices?.[0]?.message?.content;
+      console.log(`   -> [AI DIAGNOSTIC] Raw model output: "${rawContent}"`);
+      const token = rawContent?.trim().toLowerCase() || "neutral";
+      const validToken = ["positive", "negative", "neutral"].includes(token);
+      return { signal: validToken ? token : "neutral", source: `live_ai_call_${model}` };
     }
 
-    const rawContent = aiData?.choices?.[0]?.message?.content;
-    console.log(`   -> [AI DIAGNOSTIC] Raw model output: "${rawContent}"`);
-
-    const token = rawContent?.trim().toLowerCase() || "neutral";
-    const validToken = ["positive", "negative", "neutral"].includes(token);
-    if (!validToken) {
-      console.log(`   -> [AI DIAGNOSTIC] Model returned an unexpected token, defaulting to neutral.`);
-    }
-    return { signal: validToken ? token : "neutral", source: "live_ai_call" };
+    return { signal: "neutral", source: lastError || "all_models_failed" };
   } catch (err: any) {
     console.log(`   -> [AI DIAGNOSTIC] Network/parse error calling OpenRouter: ${err.message}`);
     return { signal: "neutral", source: "network_error" };
