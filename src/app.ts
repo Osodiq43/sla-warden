@@ -56,7 +56,7 @@ const CHARGE_CONFIG = {
   amount: process.env.VERIFY_FEE_AMOUNT || "0",
   currency: "0x779ded0c9e1022225f8e0630b35a9b54be713736",
   recipient: "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291",
-  description: "Counterparty Check — Pre-Trust Verification",
+  description: "Counterparty Check - Pre-Trust Verification",
   methodDetails: { chainId: 196, feePayer: true },
 };
 
