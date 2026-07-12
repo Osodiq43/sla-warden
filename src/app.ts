@@ -100,11 +100,14 @@ interface VerifyBody {
   };
 }
 
-async function analyzeReviewsWithAI(reviewsText: string): Promise<string> {
+async function analyzeReviewsWithAI(reviewsText: string): Promise<{ signal: string; source: string }> {
   if (!process.env.OPENROUTER_API_KEY) {
-    console.log("   -> [AI Warning] OPENROUTER_API_KEY missing, defaulting sentiment to neutral.");
-    return "neutral";
+    console.log("   -> [AI DIAGNOSTIC] OPENROUTER_API_KEY is NOT SET in this environment. Skipping AI call, defaulting to neutral.");
+    return { signal: "neutral", source: "skipped_no_api_key" };
   }
+  console.log(`   -> [AI DIAGNOSTIC] OPENROUTER_API_KEY present (first 6 chars: ${process.env.OPENROUTER_API_KEY.slice(0, 6)}...). Calling OpenRouter...`);
+  console.log(`   -> [AI DIAGNOSTIC] Review text being sent (first 200 chars): ${reviewsText.slice(0, 200)}`);
+
   try {
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -123,12 +126,27 @@ async function analyzeReviewsWithAI(reviewsText: string): Promise<string> {
         ]
       })
     });
+
+    console.log(`   -> [AI DIAGNOSTIC] OpenRouter HTTP status: ${response.status}`);
     const aiData = await response.json();
-    const token = aiData?.choices?.[0]?.message?.content?.trim().toLowerCase() || "neutral";
-    return ["positive", "negative", "neutral"].includes(token) ? token : "neutral";
+
+    if (!response.ok) {
+      console.log(`   -> [AI DIAGNOSTIC] OpenRouter returned an error body: ${JSON.stringify(aiData).slice(0, 500)}`);
+      return { signal: "neutral", source: `api_error_status_${response.status}` };
+    }
+
+    const rawContent = aiData?.choices?.[0]?.message?.content;
+    console.log(`   -> [AI DIAGNOSTIC] Raw model output: "${rawContent}"`);
+
+    const token = rawContent?.trim().toLowerCase() || "neutral";
+    const validToken = ["positive", "negative", "neutral"].includes(token);
+    if (!validToken) {
+      console.log(`   -> [AI DIAGNOSTIC] Model returned an unexpected token, defaulting to neutral.`);
+    }
+    return { signal: validToken ? token : "neutral", source: "live_ai_call" };
   } catch (err: any) {
-    console.log(`   -> [AI Error] OpenRouter call failed: ${err.message}`);
-    return "neutral";
+    console.log(`   -> [AI DIAGNOSTIC] Network/parse error calling OpenRouter: ${err.message}`);
+    return { signal: "neutral", source: "network_error" };
   }
 }
 
@@ -250,14 +268,15 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
             .join("\n");
 
           if (reviewComments.length > 0) {
-            const aiSignal = await analyzeReviewsWithAI(reviewComments);
-            summaryChecks.reputation.aiSignal = aiSignal;
-            if (aiSignal === "negative") {
+            const aiResult = await analyzeReviewsWithAI(reviewComments);
+            summaryChecks.reputation.aiSignal = aiResult.signal;
+            summaryChecks.reputation.aiSignalSource = aiResult.source;
+            if (aiResult.signal === "negative") {
               if (verdict !== "BLOCK") verdict = "CAUTION";
               flags.push("llm_extracted_critical_reliability_concerns");
               console.log("   -> CAUTION: AI flagged negative sentiment in reviews.");
             } else {
-              console.log(`   -> AI sentiment: [${aiSignal.toUpperCase()}]`);
+              console.log(`   -> AI sentiment: [${aiResult.signal.toUpperCase()}] (source: ${aiResult.source})`);
             }
           }
         }
