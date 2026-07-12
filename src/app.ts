@@ -33,8 +33,7 @@ async function runBootDiagnostics() {
   console.log("\n=== BOOT DIAGNOSTICS ===");
   await runDiagnosedCommand("BOOT: version", "onchainos --version");
   await runDiagnosedCommand("BOOT: wallet-status", "onchainos wallet status");
-  // CertiK's public agentId — stable target, not tied to any of our accounts
-  await runDiagnosedCommand("BOOT: agent-profile-test", "onchainos agent profile 1965");
+  await runDiagnosedCommand("BOOT: agent-profile-test", "onchainos agent profile 1965 --chain xlayer");
   await runDiagnosedCommand("BOOT: home-config-check", "ls -la ~/.onchainos 2>&1 || echo '~/.onchainos DOES NOT EXIST'");
   console.log("=== BOOT DIAGNOSTICS END ===\n");
 }
@@ -55,7 +54,6 @@ const mppx = Mppx.create({
   secretKey: process.env.MPP_SECRET_KEY!,
 });
 
-// VERIFY_FEE_AMOUNT lives in Render env vars — smallest units, e.g. 20000 = $0.02 on a 6-decimal token
 const CHARGE_CONFIG = {
   amount: process.env.VERIFY_FEE_AMOUNT || "0",
   currency: "0x779ded0c9e1022225f8e0630b35a9b54be713736",
@@ -125,7 +123,6 @@ app.get("/health", (req: Request, res: Response) => {
   return res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() });
 });
 
-// Set DEBUG_SECRET in Render env vars, then call with ?key=YOUR_SECRET
 app.get("/debug/cli-status", async (req: Request, res: Response) => {
   const providedKey = req.query.key;
   if (!process.env.DEBUG_SECRET || providedKey !== process.env.DEBUG_SECRET) {
@@ -134,7 +131,7 @@ app.get("/debug/cli-status", async (req: Request, res: Response) => {
 
   const versionCheck = await runDiagnosedCommand("DEBUG: version", "onchainos --version");
   const walletCheck = await runDiagnosedCommand("DEBUG: wallet-status", "onchainos wallet status");
-  const profileCheck = await runDiagnosedCommand("DEBUG: agent-profile-test", "onchainos agent profile 1965");
+  const profileCheck = await runDiagnosedCommand("DEBUG: agent-profile-test", "onchainos agent profile 1965 --chain xlayer");
   const homeCheck = await runDiagnosedCommand("DEBUG: home-config", "ls -la ~/.onchainos 2>&1 || echo 'MISSING'");
 
   return res.json({
@@ -150,8 +147,6 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   console.log(`\n--- [INCOMING REQUEST] ${new Date().toISOString()} ---`);
   console.log(`Target Agent ID: ${req.body?.targetAgentId || "None"}`);
 
-  // Build the real request URL from what actually served this request,
-  // not a hardcoded host — stays correct if we ever move off Render.
   const protocol = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["host"] || "sla-warden.onrender.com";
   const fullUrl = `${protocol}://${host}${req.originalUrl}`;
@@ -201,7 +196,7 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
     };
 
     console.log(`[Layer 2] Auditing identity for agent: ${targetAgentId}`);
-    const profileCheck = await runDiagnosedCommand("Layer 2", `onchainos agent profile ${targetAgentId}`);
+    const profileCheck = await runDiagnosedCommand("Layer 2", `onchainos agent profile ${targetAgentId} --chain xlayer`);
     const profileResult = profileCheck.parsed;
 
     if (!profileResult || !profileResult.ok || !profileResult.data) {
@@ -221,7 +216,7 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
 
     if (verdict !== "BLOCK") {
       console.log(`[Layer 3] Auditing feedback for agent: ${targetAgentId}`);
-      const feedbackCheck = await runDiagnosedCommand("Layer 3", `onchainos agent feedback-list --agent-id ${targetAgentId} --page-size 20`);
+      const feedbackCheck = await runDiagnosedCommand("Layer 3", `onchainos agent feedback-list --agent-id ${targetAgentId} --page-size 20 --chain xlayer`);
       const feedbackResult = feedbackCheck.parsed;
 
       if (feedbackResult && feedbackResult.ok && feedbackResult.data) {
@@ -255,7 +250,7 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
 
     if (verdict !== "BLOCK") {
       console.log(`[Layer 4] Auditing registered services for agent: ${targetAgentId}`);
-      const serviceCheck = await runDiagnosedCommand("Layer 4", `onchainos agent service-list --agent-id ${targetAgentId}`);
+      const serviceCheck = await runDiagnosedCommand("Layer 4", `onchainos agent service-list --agent-id ${targetAgentId} --chain xlayer`);
       const serviceResult = serviceCheck.parsed;
       const registeredServices = serviceResult?.ok && Array.isArray(serviceResult?.data) && serviceResult.data[0]?.list
         ? serviceResult.data[0].list
@@ -326,7 +321,6 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
     finalizedResponse.headers.forEach((v, k) => res.setHeader(k, v));
     return res.json(businessData);
   } catch (err: any) {
-    // Full detail stays server-side only — never sent to the caller.
     console.log(`[Internal Failure] ${err.message}`);
     console.log(`[Internal Failure] Stack: ${err.stack}`);
     return res.status(500).json({ error: "internal_system_error" });
