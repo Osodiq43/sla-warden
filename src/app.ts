@@ -14,6 +14,7 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 4000;
+const HEARTBEAT_INTERVAL_MS = 3 * 60 * 1000; // 3 min — adjust if OKX still shows offline between beats
 
 async function runDiagnosedCommand(label: string, cmd: string): Promise<any> {
   console.log(`[${label}] Running: ${cmd}`);
@@ -27,6 +28,21 @@ async function runDiagnosedCommand(label: string, cmd: string): Promise<any> {
     console.log(`[${label}] EXEC FAILED: ${e.message}`);
     return { stdout: e.stdout || "", stderr: e.stderr || "", parsed: null, error: e.message };
   }
+}
+
+async function sendHeartbeat() {
+  const result = await runDiagnosedCommand("HEARTBEAT", "onchainos agent heartbeat --chain-index 196 --chain xlayer");
+  if (result.error) {
+    console.log(`[HEARTBEAT] FAILED — agent will likely show OFFLINE on OKX.AI until this succeeds.`);
+  } else {
+    console.log(`[HEARTBEAT] OK — reported online at ${new Date().toISOString()}`);
+  }
+}
+
+function startHeartbeatLoop() {
+  sendHeartbeat();
+  setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+  console.log(`[HEARTBEAT] Loop started, firing every ${HEARTBEAT_INTERVAL_MS / 1000}s.`);
 }
 
 async function runBootDiagnostics() {
@@ -133,6 +149,7 @@ app.get("/debug/cli-status", async (req: Request, res: Response) => {
   const walletCheck = await runDiagnosedCommand("DEBUG: wallet-status", "onchainos wallet status");
   const profileCheck = await runDiagnosedCommand("DEBUG: agent-profile-test", "onchainos agent profile 1965 --chain xlayer");
   const homeCheck = await runDiagnosedCommand("DEBUG: home-config", "ls -la ~/.onchainos 2>&1 || echo 'MISSING'");
+  const heartbeatCheck = await runDiagnosedCommand("DEBUG: heartbeat-test", "onchainos agent heartbeat --chain-index 196 --chain xlayer");
 
   return res.json({
     binaryPresent: !versionCheck.error,
@@ -140,6 +157,7 @@ app.get("/debug/cli-status", async (req: Request, res: Response) => {
     walletStatus: walletCheck.parsed || walletCheck.error,
     sampleAgentLookup: profileCheck.parsed || profileCheck.error,
     homeConfigDir: homeCheck.stdout || homeCheck.error,
+    heartbeat: heartbeatCheck.parsed || heartbeatCheck.error,
   });
 });
 
@@ -334,4 +352,5 @@ app.use((req, res) => {
 app.listen(PORT, async () => {
   console.log(`[Counterparty Check] Server active on port ${PORT}`);
   await runBootDiagnostics();
+  startHeartbeatLoop();
 });
