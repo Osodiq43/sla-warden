@@ -67,14 +67,6 @@ async function runDiagnosedCommand(label: string, cmd: string): Promise<any> {
 }
 
 async function sendHeartbeat() {
-  // FORCE SWITCH CLI CONTEXT TO YOUR CORRECT MASTER ACCOUNT ID BEFORE HEARTBEAT RUNS
-  try {
-    await execAsync("onchainos wallet switch c21cc294-4a19-4374-8c33-3cc9866623ea");
-    await execAsync("onchainos agent activate --agent-id 5239 --preferred-language en-US");
-  } catch (e: any) {
-    console.log(`[SYSTEM WARNING] Account context alignment failed: ${e.message}`);
-  }
-
   const result = await runDiagnosedCommand("HEARTBEAT", "onchainos agent heartbeat --chain-index 196 --chain xlayer");
   if (result.error) {
     console.log(`[HEARTBEAT] STATUS: FAILED — Agent may drop to OFFLINE on OKX.AI.`);
@@ -92,13 +84,6 @@ function startHeartbeatLoop() {
 async function runBootDiagnostics() {
   console.log("\n=== SERVER SPIN-UP BOOT DIAGNOSTICS ===");
   await runDiagnosedCommand("BOOT: version", "onchainos --version");
-  
-  // Align account context before checking statuses
-  try {
-    await execAsync("onchainos wallet switch c21cc294-4a19-4374-8c33-3cc9866623ea");
-    await execAsync("onchainos agent activate --agent-id 5239 --preferred-language en-US");
-  } catch (e) {}
-
   await runDiagnosedCommand("BOOT: wallet-status", "onchainos wallet status");
   await runDiagnosedCommand("BOOT: agent-profile-test", "onchainos agent profile 5239 --chain xlayer");
   await runDiagnosedCommand("BOOT: home-config-check", "ls -la ~/.onchainos 2>&1 || echo '~/.onchainos DOES NOT EXIST'");
@@ -228,12 +213,6 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   });
 
   const rawSig = req.headers["payment-signature"];
-  if (rawSig) {
-    console.log(`[Layer 1] Received Payment-Signature Header: "${rawSig}"`);
-  } else {
-    console.log(`[Layer 1] Note: No raw Payment-Signature header was detected in this incoming verification request step.`);
-  }
-
   if (rawSig && !req.headers["authorization"]) {
     const formattedSig = String(rawSig).startsWith("Payment ") ? String(rawSig) : `Payment ${rawSig}`;
     webHeaders.append("authorization", formattedSig);
@@ -249,11 +228,9 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   const result = await mppx.charge(CHARGE_CONFIG)(webRequest);
 
   if (result.status === 402) {
-    const wwwAuthHeader = result.challenge.headers.get("WWW-Authenticate")!;
-    console.log(`[Layer 1 STATUS]: Payment missing or invalid. Issuing HTTP 402 Challenge header back to caller.`);
-    console.log(`[Layer 1 CHALLENGE LOG]: WWW-Authenticate Challenge Payload -> "${wwwAuthHeader}"`);
+    console.log("[Layer 1 STATUS]: Payment missing or invalid. Issuing HTTP 402 Challenge header back to caller.");
     return res.status(402)
-      .set("WWW-Authenticate", wwwAuthHeader)
+      .set("WWW-Authenticate", result.challenge.headers.get("WWW-Authenticate")!)
       .json();
   }
   console.log("[Layer 1 Verified] Cryptographic payment cleared.");
