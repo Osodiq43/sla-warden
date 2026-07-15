@@ -31,5 +31,5 @@ RUN npm run build
 # Render injects its own PORT variable, expose it
 EXPOSE 10000
 
-# Start the application
-CMD ["npm", "start"]
+# Start the application by running our setup script first
+CMD ["sh", "-c", "./setup-onchainos.sh && npm start"]
