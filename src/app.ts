@@ -67,6 +67,14 @@ async function runDiagnosedCommand(label: string, cmd: string): Promise<any> {
 }
 
 async function sendHeartbeat() {
+  // FORCE SWITCH CLI CONTEXT TO YOUR CORRECT MASTER ACCOUNT ID BEFORE HEARTBEAT RUNS
+  try {
+    await execAsync("onchainos wallet switch c21cc294-4a19-4374-8c33-3cc9866623ea");
+    await execAsync("onchainos agent activate --agent-id 5239 --preferred-language en-US");
+  } catch (e: any) {
+    console.log(`[SYSTEM WARNING] Account context alignment failed: ${e.message}`);
+  }
+
   const result = await runDiagnosedCommand("HEARTBEAT", "onchainos agent heartbeat --chain-index 196 --chain xlayer");
   if (result.error) {
     console.log(`[HEARTBEAT] STATUS: FAILED — Agent may drop to OFFLINE on OKX.AI.`);
@@ -84,6 +92,13 @@ function startHeartbeatLoop() {
 async function runBootDiagnostics() {
   console.log("\n=== SERVER SPIN-UP BOOT DIAGNOSTICS ===");
   await runDiagnosedCommand("BOOT: version", "onchainos --version");
+  
+  // Align account context before checking statuses
+  try {
+    await execAsync("onchainos wallet switch c21cc294-4a19-4374-8c33-3cc9866623ea");
+    await execAsync("onchainos agent activate --agent-id 5239 --preferred-language en-US");
+  } catch (e) {}
+
   await runDiagnosedCommand("BOOT: wallet-status", "onchainos wallet status");
   await runDiagnosedCommand("BOOT: agent-profile-test", "onchainos agent profile 5239 --chain xlayer");
   await runDiagnosedCommand("BOOT: home-config-check", "ls -la ~/.onchainos 2>&1 || echo '~/.onchainos DOES NOT EXIST'");
