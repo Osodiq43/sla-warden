@@ -213,6 +213,12 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   });
 
   const rawSig = req.headers["payment-signature"];
+  if (rawSig) {
+    console.log(`[Layer 1] Received Payment-Signature Header: "${rawSig}"`);
+  } else {
+    console.log(`[Layer 1] Note: No raw Payment-Signature header was detected in this incoming verification request step.`);
+  }
+
   if (rawSig && !req.headers["authorization"]) {
     const formattedSig = String(rawSig).startsWith("Payment ") ? String(rawSig) : `Payment ${rawSig}`;
     webHeaders.append("authorization", formattedSig);
@@ -228,9 +234,11 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   const result = await mppx.charge(CHARGE_CONFIG)(webRequest);
 
   if (result.status === 402) {
-    console.log("[Layer 1 STATUS]: Payment missing or invalid. Issuing HTTP 402 Challenge header back to caller.");
+    const wwwAuthHeader = result.challenge.headers.get("WWW-Authenticate")!;
+    console.log(`[Layer 1 STATUS]: Payment missing or invalid. Issuing HTTP 402 Challenge header back to caller.`);
+    console.log(`[Layer 1 CHALLENGE LOG]: WWW-Authenticate Challenge Payload -> "${wwwAuthHeader}"`);
     return res.status(402)
-      .set("WWW-Authenticate", result.challenge.headers.get("WWW-Authenticate")!)
+      .set("WWW-Authenticate", wwwAuthHeader)
       .json();
   }
   console.log("[Layer 1 Verified] Cryptographic payment cleared.");
