@@ -1,7 +1,7 @@
 import express from "express";
 import type { Request, Response } from "express";
 import * as dotenv from "dotenv";
-import { exec } from "child_process";
+import { exec, execSync } from "child_process";
 import { promisify } from "util";
 import { Mppx } from "@okxweb3/mpp";
 import { charge } from "@okxweb3/mpp/evm/server";
@@ -10,6 +10,9 @@ import { extractJsonFromStdout } from "./utils.js";
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import url from "url";
+import fs from "fs";
+import path from "path";
+import os from "os";
 
 dotenv.config();
 const execAsync = promisify(exec);
@@ -82,7 +85,7 @@ async function runBootDiagnostics() {
   console.log("\n=== SERVER SPIN-UP BOOT DIAGNOSTICS ===");
   await runDiagnosedCommand("BOOT: version", "onchainos --version");
   await runDiagnosedCommand("BOOT: wallet-status", "onchainos wallet status");
-  await runDiagnosedCommand("BOOT: agent-profile-test", "onchainos agent profile 1965 --chain xlayer");
+  await runDiagnosedCommand("BOOT: agent-profile-test", "onchainos agent profile 5239 --chain xlayer");
   await runDiagnosedCommand("BOOT: home-config-check", "ls -la ~/.onchainos 2>&1 || echo '~/.onchainos DOES NOT EXIST'");
   console.log("=== SERVER SPIN-UP BOOT DIAGNOSTICS END ===\n");
 }
@@ -181,7 +184,7 @@ app.get("/debug/cli-status", async (req: Request, res: Response) => {
 
   const versionCheck = await runDiagnosedCommand("DEBUG: version", "onchainos --version");
   const walletCheck = await runDiagnosedCommand("DEBUG: wallet-status", "onchainos wallet status");
-  const profileCheck = await runDiagnosedCommand("DEBUG: agent-profile-test", "onchainos agent profile 1965 --chain xlayer");
+  const profileCheck = await runDiagnosedCommand("DEBUG: agent-profile-test", "onchainos agent profile 5239 --chain xlayer");
   const homeCheck = await runDiagnosedCommand("DEBUG: home-config", "ls -la ~/.onchainos 2>&1 || echo 'MISSING'");
   const heartbeatCheck = await runDiagnosedCommand("DEBUG: heartbeat-test", "onchainos agent heartbeat --chain-index 196 --chain xlayer");
 
@@ -422,6 +425,29 @@ wss.on("connection", (ws: WebSocket, request: http.IncomingMessage, clientId: st
 // Pass the strictly typed number variable to eliminate server prototype overloads
 serverInstance.listen(PORT, "0.0.0.0", async () => {
   console.log(`[Counterparty Check] Server active on port ${PORT}`);
+  
+  // SESSION UNPACKING LOGIC FOR RENDER
+  const onchainosDir = path.join(os.homedir(), ".onchainos");
+  if (process.env.CLI_WALLET_SESSION) {
+    console.log("[SYSTEM] Base64 configuration data detected. Instantiating file mapping...");
+    try {
+      if (!fs.existsSync(onchainosDir)) {
+        fs.mkdirSync(onchainosDir, { recursive: true });
+      }
+      
+      const tarPath = path.join(os.tmpdir(), "session.tar.gz");
+      fs.writeFileSync(tarPath, Buffer.from(process.env.CLI_WALLET_SESSION, "base64"));
+      
+      // Unpack targeted configs directly into the context path
+      execSync(`tar -xzf ${tarPath} -C ${onchainosDir}`);
+      console.log("[SYSTEM] Successfully mapped minimal anonbrizzy@gmail.com environment.");
+    } catch (err: any) {
+      console.log(`[SYSTEM ERROR] Failed to unpack targeted configurations: ${err.message}`);
+    }
+  } else {
+    console.log("[SYSTEM] No CLI_WALLET_SESSION variable detected. Defaulting profile targets.");
+  }
+
   await runBootDiagnostics();
   startHeartbeatLoop();
 });
