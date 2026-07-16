@@ -1,5 +1,5 @@
 import express from "express";
-import type { Request, Response } from "express";
+import type { Request, Response, NextFunction } from "express";
 import * as dotenv from "dotenv";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -116,7 +116,7 @@ async function analyzeReviewsWithAI(reviewsText: string): Promise<{ signal: stri
             },
             { role: "user", content: reviewsText }
           ]
-        })
+        }) // Parenthesis added here to close the JSON.stringify call correctly
       });
 
       const aiData = await response.json();
@@ -365,15 +365,46 @@ const CHARGE_CONFIG = {
 };
 
 interface VerifyBody {
-  targetAgentId: string;
+  targetAgentId?: string | null;
   expectedServiceName?: string;
   expectedServiceType?: string;
   transactionPayload?: {
     to: string;
-    data: string;
-    value: string;
+    data?: string;
+    value?: string;
     chain?: string;
+  } | null;
+}
+
+// ================== REQUEST NORMALIZATION INTERACTION LAYER ==================
+
+function smartNormalizer(body: any): VerifyBody {
+  const normalized: VerifyBody = {
+    targetAgentId: body.targetAgentId ? String(body.targetAgentId).trim() : null,
+    expectedServiceName: body.expectedServiceName || undefined,
+    expectedServiceType: body.expectedServiceType || undefined,
+    transactionPayload: null,
   };
+
+  // Extract address variants for transactionPayload mapping
+  const rawTx = body.transactionPayload;
+  if (rawTx) {
+    const toAddress = rawTx.to || rawTx.address || rawTx.target;
+    if (toAddress) {
+      let rawData = "0x";
+      if (rawTx.data && typeof rawTx.data === "string" && rawTx.data.trim() !== "") {
+        rawData = rawTx.data.trim();
+      }
+      normalized.transactionPayload = {
+        to: toAddress.trim(),
+        data: rawData,
+        value: rawTx.value ? String(rawTx.value).trim() : "0",
+        chain: rawTx.chain || undefined
+      };
+    }
+  }
+
+  return normalized;
 }
 
 app.get("/health", (req: Request, res: Response) => {
@@ -428,6 +459,10 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   console.log(`Timestamp: ${new Date().toISOString()}`);
   console.log(`Parameters Received: ${JSON.stringify(req.body, null, 2)}`);
 
+  // Execute request normalization
+  const normalizedBody = smartNormalizer(req.body);
+  console.log(`Normalized Parameters: ${JSON.stringify(normalizedBody, null, 2)}`);
+
   const protocol = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["host"] || "sla-warden.onrender.com";
   const fullUrl = `${protocol}://${host}${req.originalUrl}`;
@@ -460,144 +495,174 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
   }
   console.log("[Layer 1 Verified] Cryptographic payment cleared.");
 
-  const { targetAgentId, expectedServiceName, expectedServiceType, transactionPayload } = req.body as VerifyBody;
-  if (!targetAgentId) {
-    console.log("[INPUT VALIDATION ERROR]: Parameter targetAgentId is missing. Dropping request.");
-    return res.status(400).json({ error: "missing_parameter: targetAgentId" });
+  const { targetAgentId, expectedServiceName, expectedServiceType, transactionPayload } = normalizedBody;
+
+  // Enforce loose boundary validation: Must provide at least one of targetAgentId OR transactionPayload
+  if (!targetAgentId && !transactionPayload) {
+    console.log("[INPUT VALIDATION ERROR]: Both targetAgentId and transactionPayload are empty. Dropping request.");
+    return res.status(400).json({ error: "missing_parameter: You must provide either targetAgentId or transactionPayload" });
   }
 
   try {
     let verdict = "PASS";
     const flags: string[] = [];
     const summaryChecks: Record<string, any> = {
-      identity: "unknown",
+      identity: "skipped",
       reputation: { score: "-", reviewCount: 0, aiSignal: "neutral" },
       serviceMatch: "skipped",
-      payloadRisk: "clear"
+      payloadRisk: "skipped"
     };
 
     const targetChain = transactionPayload?.chain || "xlayer";
+    let profileResult: any = null;
 
-    console.log(`\n--- [Layer 2: Identity Registry Scan for ID ${targetAgentId}] ---`);
-    const profileCheck = await runDiagnosedCommand("Layer 2", `onchainos agent profile ${targetAgentId} --chain ${targetChain}`);
-    const profileResult = profileCheck.parsed;
-    console.log(`[Layer 2 PARSED JSON]: ${JSON.stringify(profileResult, null, 2)}`);
+    // --- SERVICE LAYER 2: IDENTITY REGISTRY SCAN (KYA) ---
+    if (targetAgentId) {
+      console.log(`\n--- [Layer 2: Identity Registry Scan for ID ${targetAgentId}] ---`);
+      const profileCheck = await runDiagnosedCommand("Layer 2", `onchainos agent profile ${targetAgentId} --chain ${targetChain}`);
+      profileResult = profileCheck.parsed;
+      console.log(`[Layer 2 PARSED JSON]: ${JSON.stringify(profileResult, null, 2)}`);
 
-    if (!profileResult || !profileResult.ok || !profileResult.data) {
-      verdict = "BLOCK";
-      flags.push(profileCheck.error ? `cli_execution_failed: ${profileCheck.error}` : "target_agent_id_not_found_in_registry");
-      summaryChecks.identity = "unregistered_or_cli_error";
-    } else {
-      const statusLabel = profileResult.data.statusLabel ?? "unknown";
-      console.log(`[Layer 2 Verification] Target Registration Status Flag -> "${statusLabel}"`);
-      if (statusLabel === "active") {
-        summaryChecks.identity = "registered";
-      } else {
+      if (!profileResult || !profileResult.ok || !profileResult.data) {
         verdict = "BLOCK";
-        flags.push(`agent_registry_status_not_active_${statusLabel}`);
-        summaryChecks.identity = statusLabel;
-      }
-    }
-
-    if (verdict !== "BLOCK") {
-      console.log(`\n--- [Layer 3: Cryptographic Reputation Scan for ID ${targetAgentId}] ---`);
-      const feedbackCheck = await runDiagnosedCommand("Layer 3", `onchainos agent feedback-list --agent-id ${targetAgentId} --page-size 20 --chain ${targetChain}`);
-      const feedbackResult = feedbackCheck.parsed;
-      console.log(`[Layer 3 PARSED JSON]: ${JSON.stringify(feedbackResult, null, 2)}`);
-
-      if (feedbackResult && feedbackResult.ok && feedbackResult.data) {
-        const totalCount = feedbackResult.data.totalCount || 0;
-        summaryChecks.reputation.reviewCount = totalCount;
-        summaryChecks.reputation.score = feedbackResult.data.totalScore || "-";
-
-        if (totalCount === 0) {
-          console.log("[Layer 3 Evaluation] Target agent has 0 historical reviews. Adjusting status to CAUTION.");
-          if (verdict !== "BLOCK") verdict = "CAUTION";
-          flags.push("unproven_agent_zero_reviews");
+        flags.push(profileCheck.error ? `cli_execution_failed: ${profileCheck.error}` : "target_agent_id_not_found_in_registry");
+        summaryChecks.identity = "unregistered_or_cli_error";
+      } else {
+        const statusLabel = profileResult.data.statusLabel ?? "unknown";
+        console.log(`[Layer 2 Verification] Target Registration Status Flag -> "${statusLabel}"`);
+        if (statusLabel === "active") {
+          summaryChecks.identity = "registered";
         } else {
-          const reviewComments = (feedbackResult.data.list || [])
-            .map((r: any) => r.content || "")
-            .filter((c: string) => c.length > 0)
-            .join("\n");
+          verdict = "BLOCK";
+          flags.push(`agent_registry_status_not_active_${statusLabel}`);
+          summaryChecks.identity = statusLabel;
+        }
+      }
 
-          console.log(`[Layer 3 Evaluation] Extracted Review Texts:\n"""\n${reviewComments}\n"""`);
+      // --- SERVICE LAYER 3: CRYPTOGRAPHIC REPUTATION SCAN ---
+      if (verdict !== "BLOCK") {
+        console.log(`\n--- [Layer 3: Cryptographic Reputation Scan for ID ${targetAgentId}] ---`);
+        const feedbackCheck = await runDiagnosedCommand("Layer 3", `onchainos agent feedback-list --agent-id ${targetAgentId} --page-size 20 --chain ${targetChain}`);
+        const feedbackResult = feedbackCheck.parsed;
+        console.log(`[Layer 3 PARSED JSON]: ${JSON.stringify(feedbackResult, null, 2)}`);
 
-          if (reviewComments.length > 0) {
-            const aiResult = await analyzeReviewsWithAI(reviewComments);
-            summaryChecks.reputation.aiSignal = aiResult.signal;
-            console.log(`[Layer 3 Evaluation] Semantic Sentiment Verdict -> [${aiResult.signal.toUpperCase()}]`);
-            if (aiResult.signal === "negative") {
-              if (verdict !== "BLOCK") verdict = "CAUTION";
-              flags.push("llm_extracted_critical_reliability_concerns");
+        if (feedbackResult && feedbackResult.ok && feedbackResult.data) {
+          const totalCount = feedbackResult.data.totalCount || 0;
+          summaryChecks.reputation.reviewCount = totalCount;
+          summaryChecks.reputation.score = feedbackResult.data.totalScore || "-";
+
+          if (totalCount === 0) {
+            console.log("[Layer 3 Evaluation] Target agent has 0 historical reviews. Adjusting status to CAUTION.");
+            if (verdict !== "BLOCK") verdict = "CAUTION";
+            flags.push("unproven_agent_zero_reviews");
+          } else {
+            const reviewComments = (feedbackResult.data.list || [])
+              .map((r: any) => r.content || "")
+              .filter((c: string) => c.length > 0)
+              .join("\n");
+
+            console.log(`[Layer 3 Evaluation] Extracted Review Texts:\n"""\n${reviewComments}\n"""`);
+
+            if (reviewComments.length > 0) {
+              const aiResult = await analyzeReviewsWithAI(reviewComments);
+              summaryChecks.reputation.aiSignal = aiResult.signal;
+              console.log(`[Layer 3 Evaluation] Semantic Sentiment Verdict -> [${aiResult.signal.toUpperCase()}]`);
+              if (aiResult.signal === "negative") {
+                if (verdict !== "BLOCK") verdict = "CAUTION";
+                flags.push("llm_extracted_critical_reliability_concerns");
+              }
             }
           }
-        }
-      } else {
-        flags.push(feedbackCheck.error ? `feedback_lookup_cli_error: ${feedbackCheck.error}` : "feedback_lookup_failed");
-      }
-    }
-
-    if (verdict !== "BLOCK") {
-      console.log(`\n--- [Layer 4: Commercial Capabilities Alignment Check] ---`);
-      const serviceCheck = await runDiagnosedCommand("Layer 4", `onchainos agent service-list --agent-id ${targetAgentId} --chain ${targetChain}`);
-      const serviceResult = serviceCheck.parsed;
-      console.log(`[Layer 4 PARSED JSON]: ${JSON.stringify(serviceResult, null, 2)}`);
-      
-      const registeredServices = serviceResult?.ok && Array.isArray(serviceResult?.data) && serviceResult.data[0]?.list
-        ? serviceResult.data[0].list
-        : [];
-
-      if (registeredServices.length === 0) {
-        if (verdict !== "BLOCK") verdict = "CAUTION";
-        flags.push(serviceCheck.error ? `service_list_cli_error: ${serviceCheck.error}` : "zero_registered_commercial_services_found");
-        summaryChecks.serviceMatch = "no_services_found";
-      } else if (expectedServiceName || expectedServiceType) {
-        console.log(`[Layer 4 Alignment] Filtering for Name match: "${expectedServiceName}" | Type match: "${expectedServiceType}"`);
-        const matchFound = registeredServices.some((svc: any) => {
-          const nameMatch = expectedServiceName ? svc.serviceName?.toLowerCase() === expectedServiceName.toLowerCase() : true;
-          const typeMatch = expectedServiceType ? svc.serviceType?.toLowerCase() === expectedServiceType.toLowerCase() : true;
-          return nameMatch && typeMatch;
-        });
-        if (matchFound) {
-          console.log("[Layer 4 Alignment] Capability alignment verified successfully.");
-          summaryChecks.serviceMatch = "matched";
         } else {
-          if (verdict !== "BLOCK") verdict = "CAUTION";
-          flags.push("claimed_service_profile_mismatch");
-          summaryChecks.serviceMatch = "mismatch";
+          flags.push(feedbackCheck.error ? `feedback_lookup_cli_error: ${feedbackCheck.error}` : "feedback_lookup_failed");
         }
-      } else {
-        summaryChecks.serviceMatch = "unspecified";
+      }
+
+      // --- SERVICE LAYER 4: SERVICE CAPABILITIES ALIGNMENT CHECK ---
+      if (verdict !== "BLOCK") {
+        console.log(`\n--- [Layer 4: Commercial Capabilities Alignment Check] ---`);
+        const serviceCheck = await runDiagnosedCommand("Layer 4", `onchainos agent service-list --agent-id ${targetAgentId} --chain ${targetChain}`);
+        const serviceResult = serviceCheck.parsed;
+        console.log(`[Layer 4 PARSED JSON]: ${JSON.stringify(serviceResult, null, 2)}`);
+        
+        const registeredServices = serviceResult?.ok && Array.isArray(serviceResult?.data) && serviceResult.data[0]?.list
+          ? serviceResult.data[0].list
+          : [];
+
+        if (registeredServices.length === 0) {
+          if (verdict !== "BLOCK") verdict = "CAUTION";
+          flags.push(serviceCheck.error ? `service_list_cli_error: ${serviceCheck.error}` : "zero_registered_commercial_services_found");
+          summaryChecks.serviceMatch = "no_services_found";
+        } else if (expectedServiceName || expectedServiceType) {
+          console.log(`[Layer 4 Alignment] Filtering for Name match: "${expectedServiceName}" | Type match: "${expectedServiceType}"`);
+          const matchFound = registeredServices.some((svc: any) => {
+            const nameMatch = expectedServiceName ? svc.serviceName?.toLowerCase() === expectedServiceName.toLowerCase() : true;
+            const typeMatch = expectedServiceType ? svc.serviceType?.toLowerCase() === expectedServiceType.toLowerCase() : true;
+            return nameMatch && typeMatch;
+          });
+          if (matchFound) {
+            console.log("[Layer 4 Alignment] Capability alignment verified successfully.");
+            summaryChecks.serviceMatch = "matched";
+          } else {
+            if (verdict !== "BLOCK") verdict = "CAUTION";
+            flags.push("claimed_service_profile_mismatch");
+            summaryChecks.serviceMatch = "mismatch";
+          }
+        } else {
+          summaryChecks.serviceMatch = "unspecified";
+        }
       }
     }
 
+    // --- SERVICE LAYER 5: TRANSACTION SAFETY SIMULATION / TRIAGE ---
     if (transactionPayload && verdict !== "BLOCK") {
-      console.log(`\n--- [Layer 5: Sandboxed Transaction Safety Simulation] ---`);
       const { to, data, value } = transactionPayload;
-      const simFrom = profileResult?.data?.agentWalletAddress || "0x0000000000000000000000000000000000000000";
-
-      const scanCheck = await runDiagnosedCommand("Layer 5", `onchainos security tx-scan --from ${simFrom} --to ${to} --data ${data} --value ${value} --chain ${targetChain}`);
-      const scanResult = scanCheck.parsed;
-      console.log(`[Layer 5 PARSED JSON]: ${JSON.stringify(scanResult, null, 2)}`);
       
-      const risks = scanResult?.data?.riskItemDetail || [];
-      const warnings = scanResult?.data?.warnings || [];
-      const revertReason = scanResult?.data?.simulator?.revertReason || "";
+      // Determine sender context
+      const simFrom = profileResult?.data?.agentWalletAddress || "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291";
 
-      if (risks.length > 0 || warnings.length > 0) {
-        verdict = "BLOCK";
-        flags.push(`security_scan_flagged_risk_items: ${risks.length}`);
-        summaryChecks.payloadRisk = "flagged";
-      } else if (revertReason) {
-        verdict = "BLOCK";
-        flags.push(`simulation_would_revert: ${revertReason}`);
-        summaryChecks.payloadRisk = "clear";
-        summaryChecks.simulation = "would_revert";
-      } else if (scanCheck.error) {
-        flags.push(`tx_scan_cli_error: ${scanCheck.error}`);
+      if (data && data !== "0x") {
+        // Run full Tx Pre-Flight Simulation
+        console.log(`\n--- [Layer 5: Sandboxed Transaction Safety Simulation] ---`);
+        const scanCheck = await runDiagnosedCommand("Layer 5 Simulation", `onchainos security tx-scan --from ${simFrom} --to ${to} --data ${data} --value ${value} --chain ${targetChain}`);
+        const scanResult = scanCheck.parsed;
+        console.log(`[Layer 5 PARSED JSON]: ${JSON.stringify(scanResult, null, 2)}`);
+        
+        const risks = scanResult?.data?.riskItemDetail || [];
+        const warnings = scanResult?.data?.warnings || [];
+        const revertReason = scanResult?.data?.simulator?.revertReason || "";
+
+        if (risks.length > 0 || warnings.length > 0) {
+          verdict = "BLOCK";
+          flags.push(`security_scan_flagged_risk_items: ${risks.length}`);
+          summaryChecks.payloadRisk = "flagged";
+        } else if (revertReason) {
+          verdict = "BLOCK";
+          flags.push(`simulation_would_revert: ${revertReason}`);
+          summaryChecks.payloadRisk = "clear";
+          summaryChecks.simulation = "would_revert";
+        } else if (scanCheck.error) {
+          flags.push(`tx_scan_cli_error: ${scanCheck.error}`);
+        } else {
+          summaryChecks.payloadRisk = "clear";
+          summaryChecks.simulation = "stable";
+        }
       } else {
+        // Run Wallet Security Triage instead
+        console.log(`\n--- [Layer 5: Wallet Security Triage for Address ${to}] ---`);
+        const triageCheck = await runDiagnosedCommand("Layer 5 Triage", `onchainos security approvals --address ${to} --chain ${targetChain}`);
+        const triageResult = triageCheck.parsed;
+        console.log(`[Layer 5 PARSED JSON]: ${JSON.stringify(triageResult, null, 2)}`);
+
+        const allowances = triageResult?.data?.[0]?.dataList || [];
         summaryChecks.payloadRisk = "clear";
-        summaryChecks.simulation = "stable";
+        summaryChecks.simulation = "skipped (no calldata)";
+
+        const highRiskAllowances = allowances.filter((a: any) => a.riskLevel > 1);
+        if (highRiskAllowances.length > 0) {
+          verdict = "CAUTION";
+          flags.push(`vulnerable_spending_allowances: ${highRiskAllowances.length}`);
+        }
       }
     }
 
@@ -605,7 +670,7 @@ app.post("/api/v1/verify", async (req: Request, res: Response) => {
 
     const businessData = {
       verdict,
-      targetAgentId,
+      targetAgentId: targetAgentId || null,
       checks: summaryChecks,
       flags,
       wittyAnalysis: reportCardCommentary,
