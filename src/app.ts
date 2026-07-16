@@ -150,6 +150,7 @@ async function analyzeReviewsWithAI(reviewsText: string): Promise<{ signal: stri
             },
             { role: "user", content: reviewsText }
           ]
+          
         })
       });
 
@@ -426,26 +427,17 @@ wss.on("connection", (ws: WebSocket, request: http.IncomingMessage, clientId: st
 serverInstance.listen(PORT, "0.0.0.0", async () => {
   console.log(`[Counterparty Check] Server active on port ${PORT}`);
   
-  // SESSION UNPACKING LOGIC FOR RENDER
-  const onchainosDir = path.join(os.homedir(), ".onchainos");
-  if (process.env.CLI_WALLET_SESSION) {
-    console.log("[SYSTEM] Base64 configuration data detected. Instantiating file mapping...");
-    try {
-      if (!fs.existsSync(onchainosDir)) {
-        fs.mkdirSync(onchainosDir, { recursive: true });
-      }
-      
-      const tarPath = path.join(os.tmpdir(), "session.tar.gz");
-      fs.writeFileSync(tarPath, Buffer.from(process.env.CLI_WALLET_SESSION, "base64"));
-      
-      // Unpack targeted configs directly into the context path
-      execSync(`tar -xzf ${tarPath} -C ${onchainosDir}`);
-      console.log("[SYSTEM] Successfully mapped minimal anonbrizzy@gmail.com environment.");
-    } catch (err: any) {
-      console.log(`[SYSTEM ERROR] Failed to unpack targeted configurations: ${err.message}`);
-    }
-  } else {
-    console.log("[SYSTEM] No CLI_WALLET_SESSION variable detected. Defaulting profile targets.");
+  // RUN SYSTEM PRE-FLIGHT ALIGNMENT AND ACCOUNT ACTIVATION
+  try {
+    console.log("[SYSTEM] Aligning account context and validating active device signatures...");
+    
+    // Explicitly lock context into Master Account Workspace and authorize device fingerprint
+    execSync("onchainos wallet switch c21cc294-4a19-4374-8c33-3cc9866623ea");
+    execSync("onchainos agent activate --agent-id 5239 --preferred-language en-US");
+    
+    console.log("[SYSTEM] Production device registration aligned successfully.");
+  } catch (err: any) {
+    console.log(`[SYSTEM CRITICAL FAILURE] Optimization alignment dropped: ${err.message}`);
   }
 
   await runBootDiagnostics();
