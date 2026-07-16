@@ -198,6 +198,57 @@ app.get("/debug/cli-status", async (req: Request, res: Response) => {
   });
 });
 
+// ================== STANDALONE REMOTE OTP BRIDGE ==================
+
+// Endpoint A: Executes the non-blocking email trigger command natively on Render[cite: 1]
+app.post("/debug/login-start", async (req: Request, res: Response) => {
+  const providedKey = req.query.key;
+  if (!process.env.DEBUG_SECRET || providedKey !== process.env.DEBUG_SECRET) {
+    return res.status(404).json({ error: "endpoint_not_found" });
+  }
+
+  console.log("[BRIDGE] Initiating non-blocking login request for faruqquoyum@gmail.com...");
+  const result = await runDiagnosedCommand("BRIDGE LOGIN", "onchainos wallet login faruqquoyum@gmail.com --force");
+  
+  return res.json({
+    message: "Login initialization triggered successfully.",
+    cliOutput: result.parsed || result.stdout
+  });
+});
+
+// Endpoint B: Directly passes your verification code to the independent engine[cite: 1]
+app.post("/debug/login-submit", async (req: Request, res: Response) => {
+  const providedKey = req.query.key;
+  const { otp } = req.body;
+
+  if (!process.env.DEBUG_SECRET || providedKey !== process.env.DEBUG_SECRET) {
+    return res.status(404).json({ error: "endpoint_not_found" });
+  }
+  if (!otp) {
+    return res.status(400).json({ error: "Missing parameter: otp" });
+  }
+
+  console.log(`[BRIDGE] Dispatching standalone verification code token: ${otp}`);
+  const verifyResult = await runDiagnosedCommand("BRIDGE VERIFY", `onchainos wallet verify ${otp}`);
+  
+  // Explicitly link the freshly authenticated device identity to the agent registry[cite: 1]
+  try {
+    console.log("[BRIDGE] Device verified. Submitting registry activation signature...");
+    await runDiagnosedCommand("BRIDGE ACTIVATE", "onchainos agent activate --agent-id 5239 --preferred-language en-US");
+  } catch (actErr: any) {
+    console.log(`[BRIDGE WARNING] Activation routing skipped or deferred: ${actErr.message}`);
+  }
+
+  const statusCheck = await runDiagnosedCommand("BRIDGE STATUS", "onchainos wallet status");
+
+  return res.json({
+    verification: verifyResult.parsed || verifyResult.stdout,
+    currentWalletStatus: statusCheck.parsed || statusCheck.stdout
+  });
+});
+
+// ===================================================================
+
 app.post("/api/v1/verify", async (req: Request, res: Response) => {
   console.log(`\n================== [INCOMING AUDIT REQUEST] ==================`);
   console.log(`Timestamp: ${new Date().toISOString()}`);
@@ -400,7 +451,6 @@ app.use((req, res) => {
   res.status(404).json({ error: "endpoint_not_found" });
 });
 
-// Setup server and bind WebSocket Server
 const serverInstance = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
@@ -422,45 +472,10 @@ wss.on("connection", (ws: WebSocket, request: http.IncomingMessage, clientId: st
   ws.on("close", () => wsClients.delete(ws));
 });
 
-// Pass the strictly typed number variable to eliminate server prototype overloads
 serverInstance.listen(PORT, "0.0.0.0", async () => {
   console.log(`[Counterparty Check] Server active on port ${PORT}`);
   
-  const onchainosDir = path.join(os.homedir(), ".onchainos");
-  const secretSessionPath = "/etc/secrets/session.json";
-  const secretWalletsPath = "/etc/secrets/wallets.json";
-
-  // 1. FORCE THE VAULT FILE MAPPING DIRECTLY INSIDE THE RUNTIME ENVIRONMENT
-  try {
-    if (!fs.existsSync(onchainosDir)) {
-      fs.mkdirSync(onchainosDir, { recursive: true });
-    }
-
-    if (fs.existsSync(secretSessionPath) && fs.existsSync(secretWalletsPath)) {
-      console.log("[SYSTEM] Credentials located in secret mount. Overwriting session states...");
-      fs.copyFileSync(secretSessionPath, path.join(onchainosDir, "session.json"));
-      fs.copyFileSync(secretWalletsPath, path.join(onchainosDir, "wallets.json"));
-      console.log("[SYSTEM] Secure identity files copied successfully.");
-    } else {
-      console.log("[SYSTEM WARNING] Secret credential files not found at /etc/secrets/!");
-    }
-  } catch (fileErr: any) {
-    console.log(`[SYSTEM ERROR] Failed copying credentials: ${fileErr.message}`);
-  }
-  
-  // 2. RUN SYSTEM PRE-FLIGHT ALIGNMENT AND ACCOUNT ACTIVATION
-  try {
-    console.log("[SYSTEM] Aligning account context and validating active device signatures...");
-    
-    // Explicitly lock context into Master Account Workspace and authorize device fingerprint
-    execSync("onchainos wallet switch c21cc294-4a19-4374-8c33-3cc9866623ea");
-    execSync("onchainos agent activate --agent-id 5239 --preferred-language en-US");
-    
-    console.log("[SYSTEM] Production device registration aligned successfully.");
-  } catch (err: any) {
-    console.log(`[SYSTEM CRITICAL FAILURE] Optimization alignment dropped: ${err.message}`);
-  }
-
+  // Pure boot diagnostic trace without blocking session dependencies[cite: 1]
   await runBootDiagnostics();
   startHeartbeatLoop();
 });
