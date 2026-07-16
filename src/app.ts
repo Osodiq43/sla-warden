@@ -150,7 +150,6 @@ async function analyzeReviewsWithAI(reviewsText: string): Promise<{ signal: stri
             },
             { role: "user", content: reviewsText }
           ]
-          
         })
       });
 
@@ -427,7 +426,29 @@ wss.on("connection", (ws: WebSocket, request: http.IncomingMessage, clientId: st
 serverInstance.listen(PORT, "0.0.0.0", async () => {
   console.log(`[Counterparty Check] Server active on port ${PORT}`);
   
-  // RUN SYSTEM PRE-FLIGHT ALIGNMENT AND ACCOUNT ACTIVATION
+  const onchainosDir = path.join(os.homedir(), ".onchainos");
+  const secretSessionPath = "/etc/secrets/session.json";
+  const secretWalletsPath = "/etc/secrets/wallets.json";
+
+  // 1. FORCE THE VAULT FILE MAPPING DIRECTLY INSIDE THE RUNTIME ENVIRONMENT
+  try {
+    if (!fs.existsSync(onchainosDir)) {
+      fs.mkdirSync(onchainosDir, { recursive: true });
+    }
+
+    if (fs.existsSync(secretSessionPath) && fs.existsSync(secretWalletsPath)) {
+      console.log("[SYSTEM] Credentials located in secret mount. Overwriting session states...");
+      fs.copyFileSync(secretSessionPath, path.join(onchainosDir, "session.json"));
+      fs.copyFileSync(secretWalletsPath, path.join(onchainosDir, "wallets.json"));
+      console.log("[SYSTEM] Secure identity files copied successfully.");
+    } else {
+      console.log("[SYSTEM WARNING] Secret credential files not found at /etc/secrets/!");
+    }
+  } catch (fileErr: any) {
+    console.log(`[SYSTEM ERROR] Failed copying credentials: ${fileErr.message}`);
+  }
+  
+  // 2. RUN SYSTEM PRE-FLIGHT ALIGNMENT AND ACCOUNT ACTIVATION
   try {
     console.log("[SYSTEM] Aligning account context and validating active device signatures...");
     
