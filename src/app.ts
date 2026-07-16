@@ -207,8 +207,8 @@ app.post("/debug/login-start", async (req: Request, res: Response) => {
     return res.status(404).json({ error: "endpoint_not_found" });
   }
 
-  console.log("[BRIDGE] Initiating non-blocking login request for faruqquoyum@gmail.com...");
-  const result = await runDiagnosedCommand("BRIDGE LOGIN", "onchainos wallet login faruqquoyum@gmail.com --force");
+  console.log("[BRIDGE] Initiating non-blocking login request for anonbrizzy@gmail.com...");
+  const result = await runDiagnosedCommand("BRIDGE LOGIN", "onchainos wallet login anonbrizzy@gmail.com --force");
   
   return res.json({
     message: "Login initialization triggered successfully.",
