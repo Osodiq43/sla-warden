@@ -286,7 +286,17 @@ async function discoverAndApplyToPublicJobs() {
   for (const job of marketJobs) {
     const title = job.title || "";
     const jobId = job.jobId;
+    const paymentMode = job.paymentMode;
+    const tokenAmount = job.tokenAmount || "0";
+    const tokenSymbol = job.tokenSymbol || "USDT";
+
     if (!jobId) continue;
+
+    // 1. ESCROW Filtering (paymentMode 1 = ESCROW)
+    if (paymentMode !== 1) {
+      console.log(`[COMMERCE ENGINE] Skipping Job ${jobId} ("${title}") - Non-ESCROW payment mode (${paymentMode})`);
+      continue;
+    }
 
     const matchesNicheKeywords = 
       title.toLowerCase().includes("trust") || 
@@ -296,11 +306,12 @@ async function discoverAndApplyToPublicJobs() {
       title.toLowerCase().includes("audit") ||
       title.toLowerCase().includes("wallet");
 
+    // 2. Filter by Niche & Apply with Dynamic Bidding parameters
     if (matchesNicheKeywords) {
-      console.log(`[COMMERCE ENGINE] Auto-applying to public contract: "${title}"`);
+      console.log(`[COMMERCE ENGINE] Auto-applying to ESCROW contract: "${title}" with bid: ${tokenAmount} ${tokenSymbol}`);
       await runDiagnosedCommand(
         "SUBMIT APPLICATION",
-        `onchainos agent apply ${jobId} --agent-id ${AGENT_ID} --token-amount 0 --token-symbol USDT --chain xlayer`
+        `onchainos agent apply ${jobId} --agent-id ${AGENT_ID} --token-amount ${tokenAmount} --token-symbol ${tokenSymbol} --chain xlayer`
       );
     }
   }
