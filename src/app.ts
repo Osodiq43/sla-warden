@@ -32,6 +32,7 @@ const PORT = Number(process.env.PORT) || 8080;
 const activeTransports = new Map<string, SSEServerTransport>();
 const activeServers = new Map<string, Server>();
 const sessionClientIdentifiers = new Map<string, string>(); 
+const sessionPaths = new Map<string, string>(); // Maps sessionId -> mounting endpoint path
 const wsClients = new Map<WebSocket, string>();
 
 const originalConsoleLog = console.log;
@@ -449,6 +450,9 @@ const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: s
 
     const clientId = req.headers["x-client-id"];
     if (clientId) sessionClientIdentifiers.set(sessionId, String(clientId));
+    
+    // Explicitly track endpoints in our session paths registry
+    sessionPaths.set(sessionId, endpointPath);
 
     const sessionServer = serverBuilder(sessionId);
     activeTransports.set(sessionId, transport);
@@ -462,6 +466,7 @@ const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: s
       console.error(`Session failed to connect: ${sessionId}`, error);
       activeTransports.delete(sessionId);
       activeServers.delete(sessionId);
+      sessionPaths.delete(sessionId);
       if (clientId) sessionClientIdentifiers.delete(sessionId);
     });
 
@@ -471,6 +476,7 @@ const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: s
       });
       activeTransports.delete(sessionId);
       activeServers.delete(sessionId);
+      sessionPaths.delete(sessionId);
       if (clientId) sessionClientIdentifiers.delete(sessionId);
     });
   };
@@ -513,12 +519,8 @@ app.get("/mcp/active-sessions", (req: Request, res: Response) => {
     // Filter active transport endpoints matching the targeted route path
     if (targetPath) {
       matchingSessions = matchingSessions.filter(sid => {
-        const transport = activeTransports.get(sid);
-        if (transport) {
-          const reqUrl = (transport as any)._messageUrl || "";
-          return reqUrl.includes(targetPath);
-        }
-        return false;
+        const storedPath = sessionPaths.get(sid) || "";
+        return storedPath.includes(targetPath) || targetPath.includes(storedPath);
       });
     }
 
