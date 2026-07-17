@@ -26,7 +26,6 @@ const app = express();
 app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 4000;
-const AGENT_ID = "5239"; 
 
 // Active Transport & Server Mappings
 const activeTransports = new Map<string, SSEServerTransport>();
@@ -112,6 +111,7 @@ async function runDiagnosedCommand(label: string, cmd: string): Promise<any> {
 // ================== X402 PROTOCOL GATEWAY SERVER ==================
 
 const NETWORK = "eip155:196"; // X Layer Mainnet
+// Dynamic recipient resolution favoring Render Environment Configurations with target wallet fallback
 const PAY_TO = process.env.PAY_TO_ADDRESS || "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291";
 
 const facilitatorClient = new OKXFacilitatorClient({
@@ -123,9 +123,9 @@ const facilitatorClient = new OKXFacilitatorClient({
 const resourceServer = new x402ResourceServer(facilitatorClient);
 resourceServer.register(NETWORK, new ExactEvmScheme()); // Register standard EVM scheme layer
 
-// Normalize payment headers into Express routing pipeline
+// Universal Header Normalization Middleware for x402 Client Compatibilities
 app.use((req, res, next) => {
-  const rawSig = req.headers["payment-signature"];
+  const rawSig = req.headers["payment-signature"] || req.headers["Payment-Signature"] || req.headers["payment_signature"];
   if (rawSig && !req.headers["authorization"]) {
     req.headers["authorization"] = String(rawSig).startsWith("Exact ") ? String(rawSig) : `Exact ${rawSig}`;
   }
@@ -262,7 +262,7 @@ async function performCoreTelemetryAudit(targetAgentId: string | null, transacti
 
   if (transactionPayload && verdict !== "BLOCK") {
     const { to, data, value } = transactionPayload;
-    const simFrom = profileResult?.data?.agentWalletAddress || "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291";
+    const simFrom = profileResult?.data?.agentWalletAddress || PAY_TO;
 
     if (data && data !== "0x") {
       const scanCheck = await runDiagnosedCommand("Tx Sandbox", `onchainos security tx-scan --from ${simFrom} --to ${to} --data ${data} --value ${value} --chain ${targetChain}`);
@@ -517,8 +517,20 @@ app.post("/debug/login-submit", async (req: Request, res: Response) => {
   if (!otp) return res.status(400).json({ error: "Missing parameter: otp" });
 
   const verifyResult = await runDiagnosedCommand("BRIDGE VERIFY", `onchainos wallet verify ${otp}`);
+  
+  // Dynamically query user active agent instead of hardcoding
+  const agentCheck = await runDiagnosedCommand("BRIDGE MY AGENTS", "onchainos agent my-agents");
+  let activeAgentId = "5239"; // Default fallback
+  
+  if (agentCheck.parsed && agentCheck.parsed.ok && Array.isArray(agentCheck.parsed.data)) {
+    const activeAgent = agentCheck.parsed.data.find((a: any) => a.status === "active");
+    if (activeAgent) {
+      activeAgentId = activeAgent.agentId;
+    }
+  }
+
   try {
-    await runDiagnosedCommand("BRIDGE ACTIVATE", "onchainos agent activate --agent-id 5239 --preferred-language en-US");
+    await runDiagnosedCommand("BRIDGE ACTIVATE", `onchainos agent activate --agent-id ${activeAgentId} --preferred-language en-US`);
   } catch (actErr: any) {
     console.log(`[BRIDGE WARNING] Activation routing deferred: ${actErr.message}`);
   }
