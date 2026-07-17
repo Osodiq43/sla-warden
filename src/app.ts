@@ -180,7 +180,7 @@ async function callOpenRouter(systemPrompt: string, userContent: string): Promis
     ],
     generationConfig: {
       temperature: 0.2,
-      maxOutputTokens: 300
+      maxOutputTokens: 1024 // Expanded to prevent string truncation
     }
   };
 
@@ -228,7 +228,7 @@ async function callOpenRouter(systemPrompt: string, userContent: string): Promis
 
 async function generateAuditReportCard(verdict: string, flags: string[]): Promise<string> {
   console.log(`[AI DEBUG] Initiating generateAuditReportCard for verdict: ${verdict}`);
-  const systemPrompt = "You are 'SLA-Warden', a sharp, direct, and slightly witty AI security oracle. Write a 2-sentence summary report card of an agent or wallet security check based on the verdict and flags provided. Be punchy.";
+  const systemPrompt = "You are 'SLA-Warden', a sharp, direct, and slightly witty AI security oracle. Write a 2-sentence summary report card of an agent or wallet security check based on the verdict and flags provided. Be punchy. Do not include prefix tags, introduction notes, or metadata headings. Start writing the actual evaluation response immediately.";
   const userContent = `Verdict: ${verdict}. Telemetry Flags: ${flags.join(", ")}`;
   const summary = await callOpenRouter(systemPrompt, userContent);
   return summary || "Audit finalized under secure environment bounds.";
@@ -249,7 +249,7 @@ async function generateSimulationExplanationWithAI(revertReason: string, risks: 
   const systemPrompt = 
     "You are a smart contract security analysis tool. Explain this EVM transaction simulation output in simple, direct English. " +
     "Translate raw errors like 'ERC20: transfer amount exceeds balance' or security warnings into clear, professional instructions " +
-    "on what went wrong and how the user can fix it. Keep it under 3 sentences.";
+    "on what went wrong and how the user can fix it. Keep it under 3 sentences. Write only the direct solution block; do not include introductions, alternative draft versions, labels, or greetings.";
   const userContent = safeJsonStringify({ revertReason, risks, warnings });
   const explanation = await callOpenRouter(systemPrompt, userContent);
   return explanation || "Transaction simulation failed. Review your token balances and smart contract parameters before executing.";
@@ -259,7 +259,7 @@ async function generateTriageAuditWithAI(allowances: any[]): Promise<string> {
   console.log("[AI DEBUG] Initiating generateTriageAuditWithAI allowance analysis...");
   const systemPrompt = 
     "You are a decentralized wallet audit system. Review this wallet's token allowances and spending risk metrics. " +
-    "Provide a direct 2-sentence professional breakdown of any critical exposures or high spending risk parameters that could put funds at risk.";
+    "Provide a direct 2-sentence professional breakdown of any critical exposures or high spending risk parameters that could put funds at risk. Write only the evaluation sentences directly; do not include any introductions, list headers, or metadata labels.";
   const userContent = safeJsonStringify({ allowances });
   const triageSummary = await callOpenRouter(systemPrompt, userContent);
   return triageSummary || "Triage completed. No immediate high-risk token exposures detected.";
@@ -431,7 +431,10 @@ function buildKyaMcpServer(sessionId: string): Server {
 =================================================================
       `);
 
-      return { content: [{ type: "text", text: safeJsonStringify(data) }] };
+      const finalMcpOutput = { content: [{ type: "text", text: safeJsonStringify(data) }] };
+      console.log(`\n📦 [RAW MCP CALLER JSON PAYLOAD - KYA]:\n${safeJsonStringify(finalMcpOutput)}\n`);
+
+      return finalMcpOutput;
     });
   });
   return server;
@@ -475,7 +478,10 @@ function buildTriageMcpServer(sessionId: string): Server {
 =================================================================
       `);
 
-      return { content: [{ type: "text", text: safeJsonStringify(data) }] };
+      const finalMcpOutput = { content: [{ type: "text", text: safeJsonStringify(data) }] };
+      console.log(`\n📦 [RAW MCP CALLER JSON PAYLOAD - TRIAGE]:\n${safeJsonStringify(finalMcpOutput)}\n`);
+
+      return finalMcpOutput;
     });
   });
   return server;
@@ -525,7 +531,10 @@ function buildSimulationMcpServer(sessionId: string): Server {
 =================================================================
       `);
 
-      return { content: [{ type: "text", text: safeJsonStringify(data) }] };
+      const finalMcpOutput = { content: [{ type: "text", text: safeJsonStringify(data) }] };
+      console.log(`\n📦 [RAW MCP CALLER JSON PAYLOAD - SIMULATION]:\n${safeJsonStringify(finalMcpOutput)}\n`);
+
+      return finalMcpOutput;
     });
   });
   return server;
