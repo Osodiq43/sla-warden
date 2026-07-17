@@ -180,7 +180,7 @@ async function callOpenRouter(systemPrompt: string, userContent: string): Promis
     ],
     generationConfig: {
       temperature: 0.2,
-      maxOutputTokens: 1024 // Expanded to prevent string truncation
+      maxOutputTokens: 1024
     }
   };
 
@@ -265,136 +265,6 @@ async function generateTriageAuditWithAI(allowances: any[]): Promise<string> {
   return triageSummary || "Triage completed. No immediate high-risk token exposures detected.";
 }
 
-// ================== CORE TELEMETRY AUDIT ENGINE ==================
-
-async function performCoreTelemetryAudit(targetAgentId: string | null, transactionPayload: any) {
-  let verdict = "PASS";
-  const flags: string[] = [];
-  const summaryChecks: Record<string, any> = {
-    identity: "skipped",
-    reputation: { score: "-", reviewCount: 0, aiSignal: "neutral" },
-    serviceMatch: "skipped",
-    payloadRisk: "skipped"
-  };
-
-  const targetChain = transactionPayload?.chain || "xlayer";
-  let profileResult: any = null;
-  let customAiSummary = "";
-
-  if (targetAgentId) {
-    const profileCheck = await runDiagnosedCommand("Identity Scan", `onchainos agent profile ${targetAgentId} --chain ${targetChain}`);
-    profileResult = profileCheck.parsed;
-
-    if (!profileResult || !profileResult.ok || !profileResult.data) {
-      verdict = "BLOCK";
-      flags.push("target_agent_id_not_found_in_registry");
-      summaryChecks.identity = "unregistered";
-    } else {
-      const statusLabel = profileResult.data.statusLabel ?? "unknown";
-      if (statusLabel === "active") {
-        summaryChecks.identity = "registered";
-      } else {
-        verdict = "BLOCK";
-        flags.push(`agent_registry_status_not_active_${statusLabel}`);
-        summaryChecks.identity = statusLabel;
-      }
-    }
-
-    if (verdict !== "BLOCK") {
-      const feedbackCheck = await runDiagnosedCommand("Reputation Scan", `onchainos agent feedback-list --agent-id ${targetAgentId} --page-size 20 --chain ${targetChain}`);
-      const feedbackResult = feedbackCheck.parsed;
-
-      if (feedbackResult && feedbackResult.ok && feedbackResult.data) {
-        const totalCount = feedbackResult.data.totalCount || 0;
-        summaryChecks.reputation.reviewCount = totalCount;
-        summaryChecks.reputation.score = feedbackResult.data.totalScore || "-";
-
-        if (totalCount === 0) {
-          if (verdict !== "BLOCK") verdict = "CAUTION";
-          flags.push("unproven_agent_zero_reviews");
-        } else {
-          const reviewComments = (feedbackResult.data.list || [])
-            .map((r: any) => r.content || "")
-            .filter((c: string) => c.length > 0)
-            .join("\n");
-
-          if (reviewComments.length > 0) {
-            const aiResult = await analyzeReviewsWithAI(reviewComments);
-            summaryChecks.reputation.aiSignal = aiResult.signal;
-            if (aiResult.signal === "negative") {
-              if (verdict !== "BLOCK") verdict = "CAUTION";
-              flags.push("llm_extracted_critical_reliability_concerns");
-            }
-          }
-        }
-      }
-    }
-  }
-
-  if (transactionPayload && verdict !== "BLOCK") {
-    const { to, data, value } = transactionPayload;
-    const simFrom = profileResult?.data?.agentWalletAddress || PAY_TO;
-
-    if (data && data !== "0x") {
-      const valArg = (value && String(value) !== "undefined" && String(value).trim() !== "") 
-        ? `--value ${value}` 
-        : "";
-      
-      const cleanCmd = `onchainos security tx-scan --from ${simFrom} --to ${to} --data ${data} ${valArg} --chain ${targetChain}`.replace(/\s+/g, ' ').trim();
-      
-      const scanCheck = await runDiagnosedCommand("Tx Sandbox", cleanCmd);
-      const scanResult = scanCheck.parsed;
-      
-      const risks = scanResult?.data?.riskItemDetail || [];
-      const warnings = scanResult?.data?.warnings || [];
-      const revertReason = scanResult?.data?.simulator?.revertReason || "";
-
-      if (risks.length > 0 || warnings.length > 0) {
-        verdict = "BLOCK";
-        flags.push(`security_scan_flagged_risk_items: ${risks.length}`);
-        summaryChecks.payloadRisk = "flagged";
-      } else if (revertReason) {
-        verdict = "BLOCK";
-        flags.push(`simulation_would_revert: ${revertReason}`);
-        summaryChecks.payloadRisk = "clear";
-        summaryChecks.simulation = "would_revert";
-      } else {
-        summaryChecks.payloadRisk = "clear";
-        summaryChecks.simulation = "stable";
-      }
-
-      customAiSummary = await generateSimulationExplanationWithAI(revertReason, risks, warnings);
-    } else {
-      const triageCheck = await runDiagnosedCommand("Wallet Approvals", `onchainos security approvals --address ${to} --chain ${targetChain}`);
-      const triageResult = triageCheck.parsed;
-
-      const allowances = triageResult?.data?.[0]?.dataList || [];
-      summaryChecks.payloadRisk = "clear";
-      summaryChecks.simulation = "skipped (no calldata)";
-
-      const highRiskAllowances = allowances.filter((a: any) => a.riskLevel > 1);
-      if (highRiskAllowances.length > 0) {
-        if (verdict !== "BLOCK") verdict = "CAUTION";
-        flags.push(`vulnerable_spending_allowances: ${highRiskAllowances.length}`);
-      }
-
-      customAiSummary = await generateTriageAuditWithAI(allowances);
-    }
-  }
-
-  const reportCardCommentary = await generateAuditReportCard(verdict, flags);
-
-  return {
-    verdict,
-    targetAgentId: targetAgentId || null,
-    checks: summaryChecks,
-    flags,
-    wittyAnalysis: reportCardCommentary,
-    aiSummary: customAiSummary || undefined,
-    timestamp: new Date().toISOString(),
-  };
-}
-
 // ================== DYNAMIC MCP SERVER BUILDERS ==================
 
 function buildKyaMcpServer(sessionId: string): Server {
@@ -415,23 +285,87 @@ function buildKyaMcpServer(sessionId: string): Server {
     return logLocalStorage.run({ sessionId }, async () => {
       const args = z.object({ targetAgentId: z.string() }).parse(request.params.arguments);
       console.log(`[KYA ENGINE EXECUTION] Starting registry trust lookup for ID: ${args.targetAgentId}`);
-      const data = await performCoreTelemetryAudit(args.targetAgentId, null);
       
+      let verdict = "PASS";
+      const flags: string[] = [];
+      let identityStatus = "unregistered";
+      const reputation = { score: "-", reviewCount: 0, aiSignal: "neutral" };
+
+      const profileCheck = await runDiagnosedCommand("Identity Scan", `onchainos agent profile ${args.targetAgentId} --chain xlayer`);
+      const profileResult = profileCheck.parsed;
+
+      if (!profileResult || !profileResult.ok || !profileResult.data) {
+        verdict = "BLOCK";
+        flags.push("target_agent_id_not_found_in_registry");
+        identityStatus = "unregistered";
+      } else {
+        const statusLabel = profileResult.data.statusLabel ?? "unknown";
+        if (statusLabel === "active") {
+          identityStatus = "registered";
+        } else {
+          verdict = "BLOCK";
+          flags.push(`agent_registry_status_not_active_${statusLabel}`);
+          identityStatus = statusLabel;
+        }
+      }
+
+      if (verdict !== "BLOCK") {
+        const feedbackCheck = await runDiagnosedCommand("Reputation Scan", `onchainos agent feedback-list --agent-id ${args.targetAgentId} --page-size 20 --chain xlayer`);
+        const feedbackResult = feedbackCheck.parsed;
+
+        if (feedbackResult && feedbackResult.ok && feedbackResult.data) {
+          const totalCount = feedbackResult.data.totalCount || 0;
+          reputation.reviewCount = totalCount;
+          reputation.score = feedbackResult.data.totalScore || "-";
+
+          if (totalCount === 0) {
+            if (verdict !== "BLOCK") verdict = "CAUTION";
+            flags.push("unproven_agent_zero_reviews");
+          } else {
+            const reviewComments = (feedbackResult.data.list || [])
+              .map((r: any) => r.content || "")
+              .filter((c: string) => c.length > 0)
+              .join("\n");
+
+            if (reviewComments.length > 0) {
+              const aiResult = await analyzeReviewsWithAI(reviewComments);
+              reputation.aiSignal = aiResult.signal;
+              if (aiResult.signal === "negative") {
+                if (verdict !== "BLOCK") verdict = "CAUTION";
+                flags.push("llm_extracted_critical_reliability_concerns");
+              }
+            }
+          }
+        }
+      }
+
+      const wittyAnalysis = await generateAuditReportCard(verdict, flags);
+
+      const responsePayload = {
+        verdict,
+        targetAgentId: args.targetAgentId,
+        identityStatus,
+        reputation,
+        flags,
+        wittyAnalysis,
+        timestamp: new Date().toISOString()
+      };
+
       console.log(`
 =================================================================
 🚨 [FINAL AUDIT REPORT] AI AGENT TRUST CHECK (KYA)
 =================================================================
-🎯 TARGET AGENT ID : ${data.targetAgentId}
-🛡️ VERDICT         : ${data.verdict}
-💬 WITTY ANALYSIS  : ${data.wittyAnalysis}
-📊 IDENTITY STATUS : ${data.checks.identity}
-⭐ REPUTATION SCORE: ${data.checks.reputation.score} (${data.checks.reputation.reviewCount} reviews)
-📉 REPUTATION AI   : ${data.checks.reputation.aiSignal.toUpperCase()}
-⚠️ TELEMETRY FLAGS : ${data.flags.length > 0 ? data.flags.join(", ") : "NONE"}
+🎯 TARGET AGENT ID : ${responsePayload.targetAgentId}
+🛡️ VERDICT         : ${responsePayload.verdict}
+💬 WITTY ANALYSIS  : ${responsePayload.wittyAnalysis}
+📊 IDENTITY STATUS : ${responsePayload.identityStatus}
+⭐ REPUTATION SCORE: ${responsePayload.reputation.score} (${responsePayload.reputation.reviewCount} reviews)
+📉 REPUTATION AI   : ${responsePayload.reputation.aiSignal.toUpperCase()}
+⚠️ TELEMETRY FLAGS : ${responsePayload.flags.length > 0 ? responsePayload.flags.join(", ") : "NONE"}
 =================================================================
       `);
 
-      const finalMcpOutput = { content: [{ type: "text", text: safeJsonStringify(data) }] };
+      const finalMcpOutput = { content: [{ type: "text", text: safeJsonStringify(responsePayload) }] };
       console.log(`\n📦 [RAW MCP CALLER JSON PAYLOAD - KYA]:\n${safeJsonStringify(finalMcpOutput)}\n`);
 
       return finalMcpOutput;
@@ -464,21 +398,48 @@ function buildTriageMcpServer(sessionId: string): Server {
     return logLocalStorage.run({ sessionId }, async () => {
       const args = z.object({ transactionPayload: z.object({ to: z.string() }) }).parse(request.params.arguments);
       console.log(`[TRIAGE ENGINE EXECUTION] Starting allowance spend health scan for address: ${args.transactionPayload.to}`);
-      const data = await performCoreTelemetryAudit(null, args.transactionPayload);
       
+      let verdict = "PASS";
+      const flags: string[] = [];
+
+      const triageCheck = await runDiagnosedCommand("Wallet Approvals", `onchainos security approvals --address ${args.transactionPayload.to} --chain xlayer`);
+      const triageResult = triageCheck.parsed;
+
+      const allowances = triageResult?.data?.[0]?.dataList || [];
+      const highRiskAllowances = allowances.filter((a: any) => a.riskLevel > 1);
+      
+      if (highRiskAllowances.length > 0) {
+        verdict = "CAUTION";
+        flags.push(`vulnerable_spending_allowances: ${highRiskAllowances.length}`);
+      }
+
+      const aiSummary = await generateTriageAuditWithAI(allowances);
+      const wittyAnalysis = await generateAuditReportCard(verdict, flags);
+
+      const responsePayload = {
+        verdict,
+        targetAddress: args.transactionPayload.to,
+        activeAllowanceCount: allowances.length,
+        highRiskAllowanceCount: highRiskAllowances.length,
+        flags,
+        wittyAnalysis,
+        aiSummary,
+        timestamp: new Date().toISOString()
+      };
+
       console.log(`
 =================================================================
 🚨 [FINAL AUDIT REPORT] WALLET SECURITY TRIAGE
 =================================================================
-🛡️ VERDICT         : ${data.verdict}
-💬 WITTY ANALYSIS  : ${data.wittyAnalysis}
-🤖 AI SUMMARY      : ${data.aiSummary || "N/A"}
-💸 PAYLOAD RISK    : ${data.checks.payloadRisk}
-⚠️ TELEMETRY FLAGS : ${data.flags.length > 0 ? data.flags.join(", ") : "NONE"}
+🛡️ VERDICT         : ${responsePayload.verdict}
+💬 WITTY ANALYSIS  : ${responsePayload.wittyAnalysis}
+🤖 AI SUMMARY      : ${responsePayload.aiSummary}
+💸 ACTIVE ALLOWS   : ${responsePayload.activeAllowanceCount} (${responsePayload.highRiskAllowanceCount} high risk)
+⚠️ TELEMETRY FLAGS : ${responsePayload.flags.length > 0 ? responsePayload.flags.join(", ") : "NONE"}
 =================================================================
       `);
 
-      const finalMcpOutput = { content: [{ type: "text", text: safeJsonStringify(data) }] };
+      const finalMcpOutput = { content: [{ type: "text", text: safeJsonStringify(responsePayload) }] };
       console.log(`\n📦 [RAW MCP CALLER JSON PAYLOAD - TRIAGE]:\n${safeJsonStringify(finalMcpOutput)}\n`);
 
       return finalMcpOutput;
@@ -517,21 +478,63 @@ function buildSimulationMcpServer(sessionId: string): Server {
         transactionPayload: z.object({ to: z.string(), data: z.string(), value: z.string().optional() })
       }).parse(request.params.arguments);
       console.log(`[SIMULATION ENGINE EXECUTION] Dispatching dry-run pre-flight to target contract: ${args.transactionPayload.to}`);
-      const data = await performCoreTelemetryAudit(null, args.transactionPayload);
       
+      let verdict = "PASS";
+      const flags: string[] = [];
+      let simulationState = "stable";
+
+      const valArg = (args.transactionPayload.value && String(args.transactionPayload.value).trim() !== "") 
+        ? `--value ${args.transactionPayload.value}` 
+        : "";
+      
+      const cleanCmd = `onchainos security tx-scan --from ${PAY_TO} --to ${args.transactionPayload.to} --data ${args.transactionPayload.data} ${valArg} --chain xlayer`.replace(/\s+/g, ' ').trim();
+      
+      const scanCheck = await runDiagnosedCommand("Tx Sandbox", cleanCmd);
+      const scanResult = scanCheck.parsed;
+      
+      const risks = scanResult?.data?.riskItemDetail || [];
+      const warnings = scanResult?.data?.warnings || [];
+      const revertReason = scanResult?.data?.simulator?.revertReason || "";
+
+      if (risks.length > 0 || warnings.length > 0) {
+        verdict = "BLOCK";
+        flags.push(`security_scan_flagged_risk_items: ${risks.length}`);
+        simulationState = "flagged_risks";
+      } else if (revertReason) {
+        verdict = "BLOCK";
+        flags.push(`simulation_would_revert: ${revertReason}`);
+        simulationState = "would_revert";
+      }
+
+      const aiSummary = await generateSimulationExplanationWithAI(revertReason, risks, warnings);
+      const wittyAnalysis = await generateAuditReportCard(verdict, flags);
+
+      const responsePayload = {
+        verdict,
+        targetContract: args.transactionPayload.to,
+        simulationState,
+        revertReason: revertReason || undefined,
+        riskCount: risks.length,
+        warningCount: warnings.length,
+        flags,
+        wittyAnalysis,
+        aiSummary,
+        timestamp: new Date().toISOString()
+      };
+
       console.log(`
 =================================================================
 🚨 [FINAL AUDIT REPORT] TX PRE-FLIGHT SIMULATION
 =================================================================
-🛡️ VERDICT         : ${data.verdict}
-💬 WITTY ANALYSIS  : ${data.wittyAnalysis}
-🤖 AI SUMMARY      : ${data.aiSummary || "N/A"}
-🔄 SIMULATION STATE: ${data.checks.simulation}
-⚠️ TELEMETRY FLAGS : ${data.flags.length > 0 ? data.flags.join(", ") : "NONE"}
+🛡️ VERDICT         : ${responsePayload.verdict}
+💬 WITTY ANALYSIS  : ${responsePayload.wittyAnalysis}
+🤖 AI SUMMARY      : ${responsePayload.aiSummary}
+🔄 SIMULATION STATE: ${responsePayload.simulationState}
+⚠️ TELEMETRY FLAGS : ${responsePayload.flags.length > 0 ? responsePayload.flags.join(", ") : "NONE"}
 =================================================================
       `);
 
-      const finalMcpOutput = { content: [{ type: "text", text: safeJsonStringify(data) }] };
+      const finalMcpOutput = { content: [{ type: "text", text: safeJsonStringify(responsePayload) }] };
       console.log(`\n📦 [RAW MCP CALLER JSON PAYLOAD - SIMULATION]:\n${safeJsonStringify(finalMcpOutput)}\n`);
 
       return finalMcpOutput;
