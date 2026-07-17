@@ -116,7 +116,7 @@ async function analyzeReviewsWithAI(reviewsText: string): Promise<{ signal: stri
             },
             { role: "user", content: reviewsText }
           ]
-        }) // Parenthesis added here to close the JSON.stringify call correctly
+        })
       });
 
       const aiData = await response.json();
