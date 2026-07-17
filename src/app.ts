@@ -20,19 +20,18 @@ import url from "url";
 dotenv.config();
 const execAsync = promisify(exec);
 
-// Local storage thread context to isolate log prints by execution sessions
 const logLocalStorage = new AsyncLocalStorage<{ sessionId: string }>();
 
 const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-const PORT = Number(process.env.PORT) || 4000;
+// Dynamic port resolution for Render, falling back to 8080
+const PORT = Number(process.env.PORT) || 8080;
 
-// Active Transport & Server Mappings
 const activeTransports = new Map<string, SSEServerTransport>();
 const activeServers = new Map<string, Server>();
-const sessionClientIdentifiers = new Map<string, string>(); // sessionId -> client-id
+const sessionClientIdentifiers = new Map<string, string>(); 
 const wsClients = new Map<WebSocket, string>();
 
 const originalConsoleLog = console.log;
@@ -67,7 +66,6 @@ function broadcastLog(message: string) {
       });
     }
   } else {
-    // Global broadcast fallback if out of dynamic session bounds (e.g. system logs)
     wsClients.forEach((wsClientId, clientWs) => {
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(message);
@@ -91,7 +89,6 @@ console.error = (...args: any[]) => {
 async function runDiagnosedCommand(label: string, cmd: string): Promise<any> {
   console.log(`[${label}] Executing Shell Command: ${cmd}`);
   try {
-    // Inject custom mapped environment variables into the child process execution context
     const { stdout, stderr } = await execAsync(cmd, {
       env: {
         ...process.env,
@@ -112,8 +109,7 @@ async function runDiagnosedCommand(label: string, cmd: string): Promise<any> {
 
 // ================== X402 PROTOCOL GATEWAY SERVER ==================
 
-const NETWORK = "eip155:196"; // X Layer Mainnet
-// Dynamic recipient resolution favoring Render Environment Configurations with target wallet fallback
+const NETWORK = "eip155:196"; 
 const PAY_TO = process.env.PAY_TO_ADDRESS || "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291";
 
 const facilitatorClient = new OKXFacilitatorClient({
@@ -123,9 +119,8 @@ const facilitatorClient = new OKXFacilitatorClient({
 });
 
 const resourceServer = new x402ResourceServer(facilitatorClient);
-resourceServer.register(NETWORK, new ExactEvmScheme()); // Register standard EVM scheme layer
+resourceServer.register(NETWORK, new ExactEvmScheme()); 
 
-// Universal Header Normalization Middleware for x402 Client Compatibilities
 app.use((req, res, next) => {
   const rawSig = req.headers["payment-signature"] || req.headers["Payment-Signature"] || req.headers["payment_signature"];
   if (rawSig && !req.headers["authorization"]) {
@@ -134,23 +129,23 @@ app.use((req, res, next) => {
   next();
 });
 
-// Configure x402 Billing Middleware globally for accurate Express route mappings
+// Root-level global configuration to avoid sub-router matches stripping req.path
 if (process.env.BYPASS_PAYMENT !== "true") {
   app.use(
     paymentMiddleware(
       {
         "GET /mcp/kya": {
-          accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "0" }],
+          accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "$0" }],
           description: "AI Agent Trust Check (KYA) Zero Fee standard service gate",
           mimeType: "application/json",
         },
         "GET /mcp/triage": {
-          accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "0" }],
+          accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "$0" }],
           description: "Wallet Security Triage Zero Fee standard service gate",
           mimeType: "application/json",
         },
         "GET /mcp/simulation": {
-          accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "0" }],
+          accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "$0" }],
           description: "Tx Pre-Flight Simulation Zero Fee standard service gate",
           mimeType: "application/json",
         },
@@ -436,18 +431,16 @@ function buildSimulationMcpServer(sessionId: string): Server {
   return server;
 }
 
-// ================== ISOLATED A2MCP MOUNT ROUTERS ==================
+// ================== ISOLATED A2MCP DIRECT ROUTERS ==================
 
 const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: string) => {
-  const router = express.Router();
-
-  router.get("/", (req: Request, res: Response) => {
+  return (req: Request, res: Response) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
 
-    const host = req.headers.host || "localhost:4000";
+    const host = req.headers.host || "localhost:8080";
     const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
     const messageUrl = `${protocol}://${host}${endpointPath}/messages`;
 
@@ -480,9 +473,11 @@ const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: s
       activeServers.delete(sessionId);
       if (clientId) sessionClientIdentifiers.delete(sessionId);
     });
-  });
+  };
+};
 
-  router.post("/messages", (req: Request, res: Response) => {
+const buildMcpMessageHandler = () => {
+  return (req: Request, res: Response) => {
     const sessionId = req.query.sessionId as string;
     logLocalStorage.run({ sessionId }, () => {
       const transport = activeTransports.get(sessionId);
@@ -492,15 +487,18 @@ const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: s
         res.status(400).send("No active session segment found in mapping space.");
       }
     });
-  });
-
-  return router;
+  };
 };
 
-// Mount routes
-app.use("/mcp/kya", buildMcpHandler(buildKyaMcpServer, "/mcp/kya"));
-app.use("/mcp/triage", buildMcpHandler(buildTriageMcpServer, "/mcp/triage"));
-app.use("/mcp/simulation", buildMcpHandler(buildSimulationMcpServer, "/mcp/simulation"));
+// Bind Direct Paths to Express to match RouteRisk's routing pattern perfectly
+app.get("/mcp/kya", buildMcpHandler(buildKyaMcpServer, "/mcp/kya"));
+app.post("/mcp/kya/messages", buildMcpMessageHandler());
+
+app.get("/mcp/triage", buildMcpHandler(buildTriageMcpServer, "/mcp/triage"));
+app.post("/mcp/triage/messages", buildMcpMessageHandler());
+
+app.get("/mcp/simulation", buildMcpHandler(buildSimulationMcpServer, "/mcp/simulation"));
+app.post("/mcp/simulation/messages", buildMcpMessageHandler());
 
 // Global Session Diagnostics Endpoint
 app.get("/mcp/active-sessions", (req: Request, res: Response) => {
@@ -554,9 +552,8 @@ app.post("/debug/login-submit", async (req: Request, res: Response) => {
 
   const verifyResult = await runDiagnosedCommand("BRIDGE VERIFY", `onchainos wallet verify ${otp}`);
   
-  // Dynamically query user active agent instead of hardcoding
   const agentCheck = await runDiagnosedCommand("BRIDGE MY AGENTS", "onchainos agent my-agents");
-  let activeAgentId = "5239"; // Default fallback
+  let activeAgentId = "5239"; 
   
   if (agentCheck.parsed && agentCheck.parsed.ok && Array.isArray(agentCheck.parsed.data)) {
     const activeAgent = agentCheck.parsed.data.find((a: any) => a.status === "active");
@@ -603,7 +600,6 @@ async function runBootDiagnostics() {
   console.log("\n=== SERVER SPIN-UP BOOT DIAGNOSTICS ===");
   await runDiagnosedCommand("BOOT: version", "onchainos --version");
 
-  // Automatically authenticate using the configured OKX_API_KEY if present
   if (process.env.OKX_API_KEY) {
     console.log("[BOOT: login] Found API credentials. Attempting automated login...");
     await runDiagnosedCommand("BOOT: login-action", "onchainos wallet login");
