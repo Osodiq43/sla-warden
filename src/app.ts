@@ -159,65 +159,72 @@ if (process.env.BYPASS_PAYMENT !== "true") {
 async function callOpenRouter(systemPrompt: string, userContent: string): Promise<string | null> {
   const rawKey = process.env.OPENROUTER_API_KEY;
   
-  console.log("[AI DEBUG] Entering callOpenRouter...");
-  console.log(`[AI DEBUG] OPENROUTER_API_KEY raw checking: exists=${!!rawKey}, length=${rawKey ? rawKey.length : 0}`);
-  
-  if (rawKey) {
-    console.log(`[AI DEBUG] Key starts with: "${rawKey.slice(0, 8)}..." | ends with: "...${rawKey.slice(-4)}"`);
-    console.log(`[AI DEBUG] Key contains whitespace/newlines? spaces=${rawKey.includes(" ")}, newlines=${rawKey.includes("\n")}`);
-  }
+  console.log("[AI DEBUG] Entering callOpenRouter (Configured for Native Gemini)...");
+  console.log(`[AI DEBUG] API Key Check: exists=${!!rawKey}, length=${rawKey ? rawKey.length : 0}`);
 
   if (!rawKey || rawKey.trim() === "") {
-    console.error("[AI DEBUG CRITICAL] Bypassing call. OPENROUTER_API_KEY is undefined or empty in process.env!");
+    console.error("[AI DEBUG CRITICAL] Bypassing call. API Key is undefined or empty!");
     return null;
   }
 
   const cleanKey = rawKey.trim();
+  
   const requestBody = {
-    model: "meta-llama/llama-3.3-70b-instruct:free",
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userContent }
-    ]
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: `${systemPrompt}\n\nContext to analyze:\n${userContent}` }
+        ]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.2,
+      maxOutputTokens: 300
+    }
   };
 
-  try {
-    console.log("[AI DEBUG] Despatching fetch payload to OpenRouter...");
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${cleanKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://sla-warden.onrender.com", // Useful for OpenRouter tracking
-        "X-Title": "SLA-Warden Auditing Engine"
-      },
-      body: JSON.stringify(requestBody)
-    });
+  // Implements gemini-3.5-flash with gemini-3.1-flash-lite fallback logic
+  const models = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
 
-    console.log(`[AI DEBUG] OpenRouter Network Response Status: ${response.status} (${response.statusText})`);
-    
-    if (!response.ok) {
-      const errorPayload = await response.text();
-      console.error(`[AI DEBUG HTTP FAILURE] Status: ${response.status} | Details: ${errorPayload}`);
-      return null;
-    }
+  for (const model of models) {
+    try {
+      console.log(`[AI DEBUG] Dispatching payload to Google AI Studio using model: ${model}...`);
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
 
-    const data = await response.json();
-    console.log(`[AI DEBUG] Response Body parsed successfully. Choice present? ${!!data?.choices?.[0]}`);
-    
-    if (data?.choices?.[0]?.message?.content) {
-      const generatedText = data.choices[0].message.content.trim();
-      console.log(`[AI DEBUG SUCCESS] Character count output: ${generatedText.length}`);
-      return generatedText;
-    } else {
-      console.warn("[AI DEBUG EMPTY RESPONSE] No content found in choices. Raw JSON response payload:", JSON.stringify(data));
-      return null;
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      console.log(`[AI DEBUG] [${model}] Network Response Status: ${response.status} (${response.statusText})`);
+      
+      if (!response.ok) {
+        const errorPayload = await response.text();
+        console.error(`[AI DEBUG] Model ${model} returned error. Status: ${response.status} | Details: ${errorPayload}`);
+        continue;
+      }
+
+      const data = await response.json();
+      const generatedText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (generatedText) {
+        const cleanText = generatedText.trim();
+        console.log(`[AI DEBUG SUCCESS] [${model}] Generated output of size: ${cleanText.length}`);
+        return cleanText;
+      } else {
+        console.warn(`[AI DEBUG] Model ${model} returned empty payload layout. Raw response:`, JSON.stringify(data));
+      }
+    } catch (err: any) {
+      console.error(`[AI DEBUG EXCEPTION] Failed on model ${model}: ${err.message}`);
     }
-  } catch (err: any) {
-    console.error(`[AI DEBUG CRITICAL EXCEPTION] Failed to execute HTTP call to OpenRouter: ${err.message}`);
-    if (err.stack) console.error(`[AI DEBUG STACK]: ${err.stack}`);
-    return null;
   }
+
+  console.error("[AI DEBUG CRITICAL] All Gemini fallback models failed.");
+  return null;
 }
 
 async function generateAuditReportCard(verdict: string, flags: string[]): Promise<string> {
