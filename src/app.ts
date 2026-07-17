@@ -184,7 +184,6 @@ async function callOpenRouter(systemPrompt: string, userContent: string): Promis
     }
   };
 
-  // Implements gemini-3.5-flash with gemini-3.1-flash-lite fallback logic
   const models = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
 
   for (const model of models) {
@@ -364,7 +363,6 @@ async function performCoreTelemetryAudit(targetAgentId: string | null, transacti
         summaryChecks.simulation = "stable";
       }
 
-      // Execute Simulation-focused AI analysis
       customAiSummary = await generateSimulationExplanationWithAI(revertReason, risks, warnings);
     } else {
       const triageCheck = await runDiagnosedCommand("Wallet Approvals", `onchainos security approvals --address ${to} --chain ${targetChain}`);
@@ -380,12 +378,10 @@ async function performCoreTelemetryAudit(targetAgentId: string | null, transacti
         flags.push(`vulnerable_spending_allowances: ${highRiskAllowances.length}`);
       }
 
-      // Execute Triage-focused AI analysis
       customAiSummary = await generateTriageAuditWithAI(allowances);
     }
   }
 
-  // Generate the main witty oracle commentary block
   const reportCardCommentary = await generateAuditReportCard(verdict, flags);
 
   return {
@@ -420,6 +416,21 @@ function buildKyaMcpServer(sessionId: string): Server {
       const args = z.object({ targetAgentId: z.string() }).parse(request.params.arguments);
       console.log(`[KYA ENGINE EXECUTION] Starting registry trust lookup for ID: ${args.targetAgentId}`);
       const data = await performCoreTelemetryAudit(args.targetAgentId, null);
+      
+      console.log(`
+=================================================================
+🚨 [FINAL AUDIT REPORT] AI AGENT TRUST CHECK (KYA)
+=================================================================
+🎯 TARGET AGENT ID : ${data.targetAgentId}
+🛡️ VERDICT         : ${data.verdict}
+💬 WITTY ANALYSIS  : ${data.wittyAnalysis}
+📊 IDENTITY STATUS : ${data.checks.identity}
+⭐ REPUTATION SCORE: ${data.checks.reputation.score} (${data.checks.reputation.reviewCount} reviews)
+📉 REPUTATION AI   : ${data.checks.reputation.aiSignal.toUpperCase()}
+⚠️ TELEMETRY FLAGS : ${data.flags.length > 0 ? data.flags.join(", ") : "NONE"}
+=================================================================
+      `);
+
       return { content: [{ type: "text", text: safeJsonStringify(data) }] };
     });
   });
@@ -451,6 +462,19 @@ function buildTriageMcpServer(sessionId: string): Server {
       const args = z.object({ transactionPayload: z.object({ to: z.string() }) }).parse(request.params.arguments);
       console.log(`[TRIAGE ENGINE EXECUTION] Starting allowance spend health scan for address: ${args.transactionPayload.to}`);
       const data = await performCoreTelemetryAudit(null, args.transactionPayload);
+      
+      console.log(`
+=================================================================
+🚨 [FINAL AUDIT REPORT] WALLET SECURITY TRIAGE
+=================================================================
+🛡️ VERDICT         : ${data.verdict}
+💬 WITTY ANALYSIS  : ${data.wittyAnalysis}
+🤖 AI SUMMARY      : ${data.aiSummary || "N/A"}
+💸 PAYLOAD RISK    : ${data.checks.payloadRisk}
+⚠️ TELEMETRY FLAGS : ${data.flags.length > 0 ? data.flags.join(", ") : "NONE"}
+=================================================================
+      `);
+
       return { content: [{ type: "text", text: safeJsonStringify(data) }] };
     });
   });
@@ -488,6 +512,19 @@ function buildSimulationMcpServer(sessionId: string): Server {
       }).parse(request.params.arguments);
       console.log(`[SIMULATION ENGINE EXECUTION] Dispatching dry-run pre-flight to target contract: ${args.transactionPayload.to}`);
       const data = await performCoreTelemetryAudit(null, args.transactionPayload);
+      
+      console.log(`
+=================================================================
+🚨 [FINAL AUDIT REPORT] TX PRE-FLIGHT SIMULATION
+=================================================================
+🛡️ VERDICT         : ${data.verdict}
+💬 WITTY ANALYSIS  : ${data.wittyAnalysis}
+🤖 AI SUMMARY      : ${data.aiSummary || "N/A"}
+🔄 SIMULATION STATE: ${data.checks.simulation}
+⚠️ TELEMETRY FLAGS : ${data.flags.length > 0 ? data.flags.join(", ") : "NONE"}
+=================================================================
+      `);
+
       return { content: [{ type: "text", text: safeJsonStringify(data) }] };
     });
   });
