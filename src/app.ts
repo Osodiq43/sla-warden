@@ -1,5 +1,6 @@
 import express from "express";
 import type { Request, Response } from "express";
+import cors from "cors";
 import * as dotenv from "dotenv";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -23,6 +24,7 @@ const execAsync = promisify(exec);
 const logLocalStorage = new AsyncLocalStorage<{ sessionId: string }>();
 
 const app = express();
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 4000;
@@ -131,6 +133,32 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// Configure x402 Billing Middleware globally for accurate Express route mappings
+if (process.env.BYPASS_PAYMENT !== "true") {
+  app.use(
+    paymentMiddleware(
+      {
+        "GET /mcp/kya": {
+          accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "0" }],
+          description: "AI Agent Trust Check (KYA) Zero Fee standard service gate",
+          mimeType: "application/json",
+        },
+        "GET /mcp/triage": {
+          accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "0" }],
+          description: "Wallet Security Triage Zero Fee standard service gate",
+          mimeType: "application/json",
+        },
+        "GET /mcp/simulation": {
+          accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "0" }],
+          description: "Tx Pre-Flight Simulation Zero Fee standard service gate",
+          mimeType: "application/json",
+        },
+      },
+      resourceServer
+    )
+  );
+}
 
 // ================== CREATIVE GENIUS REPORT ENGINE ==================
 
@@ -408,25 +436,10 @@ function buildSimulationMcpServer(sessionId: string): Server {
   return server;
 }
 
-// ================== ISOLATED A2MCP MOUNT ROUTERS WITH x402 PAYWALLS ==================
+// ================== ISOLATED A2MCP MOUNT ROUTERS ==================
 
-const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: string, desc: string) => {
+const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: string) => {
   const router = express.Router();
-
-  if (process.env.BYPASS_PAYMENT !== "true") {
-    router.use(
-      paymentMiddleware(
-        {
-          [`GET ${endpointPath}`]: {
-            accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "0" }],
-            description: desc,
-            mimeType: "application/json",
-          },
-        },
-        resourceServer
-      )
-    );
-  }
 
   router.get("/", (req: Request, res: Response) => {
     res.setHeader("Content-Type", "text/event-stream");
@@ -460,6 +473,9 @@ const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: s
     });
 
     req.on("close", () => {
+      logLocalStorage.run({ sessionId }, () => {
+        console.log(`[A2MCP CLOSE] Connection closed for route ${endpointPath} on session ${sessionId}`);
+      });
       activeTransports.delete(sessionId);
       activeServers.delete(sessionId);
       if (clientId) sessionClientIdentifiers.delete(sessionId);
@@ -481,9 +497,29 @@ const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: s
   return router;
 };
 
-app.use("/mcp/kya", buildMcpHandler(buildKyaMcpServer, "/mcp/kya", "AI Agent Trust Check (KYA) Zero Fee standard service gate"));
-app.use("/mcp/triage", buildMcpHandler(buildTriageMcpServer, "/mcp/triage", "Wallet Security Triage Zero Fee standard service gate"));
-app.use("/mcp/simulation", buildMcpHandler(buildSimulationMcpServer, "/mcp/simulation", "Tx Pre-Flight Simulation Zero Fee standard service gate"));
+// Mount routes
+app.use("/mcp/kya", buildMcpHandler(buildKyaMcpServer, "/mcp/kya"));
+app.use("/mcp/triage", buildMcpHandler(buildTriageMcpServer, "/mcp/triage"));
+app.use("/mcp/simulation", buildMcpHandler(buildSimulationMcpServer, "/mcp/simulation"));
+
+// Global Session Diagnostics Endpoint
+app.get("/mcp/active-sessions", (req: Request, res: Response) => {
+  const targetId = req.headers["x-client-id"] || req.query.clientId;
+  
+  if (targetId) {
+    const matchingSessions = Array.from(sessionClientIdentifiers.entries())
+      .filter(([_, cid]) => cid === targetId)
+      .map(([sid, _]) => sid);
+      
+    return res.status(200).json({
+      activeSessionIds: matchingSessions
+    });
+  }
+
+  return res.status(200).json({
+    activeSessionIds: Array.from(activeTransports.keys())
+  });
+});
 
 // ================== DEBUG AND LOGIN ANCHOR ROUTING LAYER ==================
 
