@@ -9,6 +9,7 @@
     "start": "tsx src/app.ts"
   },
   "dependencies": {
+    "@okxweb3/a2a-node": "^0.1.9",
     "@okxweb3/mpp": "^0.1.0",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",

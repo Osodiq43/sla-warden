@@ -22,6 +22,10 @@ COPY tsconfig.json ./
 # Run clean install
 RUN npm ci
 
+# Install platform monitoring runtime dependencies and run diagnostic fix
+RUN npm install -g @okxweb3/a2a-node
+RUN npx okx-a2a doctor --fix
+
 # Copy application source code
 COPY . .
 
