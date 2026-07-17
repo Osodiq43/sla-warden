@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:22-slim
 
 # Install curl and shell prerequisites
 RUN apt-get update && apt-get install -y \
