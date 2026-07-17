@@ -157,31 +157,71 @@ if (process.env.BYPASS_PAYMENT !== "true") {
 // ================== CREATIVE GENIUS REPORT ENGINE ==================
 
 async function callOpenRouter(systemPrompt: string, userContent: string): Promise<string | null> {
-  if (!process.env.OPENROUTER_API_KEY) return null;
+  const rawKey = process.env.OPENROUTER_API_KEY;
+  
+  console.log("[AI DEBUG] Entering callOpenRouter...");
+  console.log(`[AI DEBUG] OPENROUTER_API_KEY raw checking: exists=${!!rawKey}, length=${rawKey ? rawKey.length : 0}`);
+  
+  if (rawKey) {
+    console.log(`[AI DEBUG] Key starts with: "${rawKey.slice(0, 8)}..." | ends with: "...${rawKey.slice(-4)}"`);
+    console.log(`[AI DEBUG] Key contains whitespace/newlines? spaces=${rawKey.includes(" ")}, newlines=${rawKey.includes("\n")}`);
+  }
+
+  if (!rawKey || rawKey.trim() === "") {
+    console.error("[AI DEBUG CRITICAL] Bypassing call. OPENROUTER_API_KEY is undefined or empty in process.env!");
+    return null;
+  }
+
+  const cleanKey = rawKey.trim();
+  const requestBody = {
+    model: "meta-llama/llama-3.3-70b-instruct:free",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userContent }
+    ]
+  };
+
   try {
+    console.log("[AI DEBUG] Despatching fetch payload to OpenRouter...");
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "Authorization": `Bearer ${cleanKey}`,
         "Content-Type": "application/json",
+        "HTTP-Referer": "https://sla-warden.onrender.com", // Useful for OpenRouter tracking
+        "X-Title": "SLA-Warden Auditing Engine"
       },
-      body: JSON.stringify({
-        model: "meta-llama/llama-3.3-70b-instruct:free",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userContent }
-        ]
-      })
+      body: JSON.stringify(requestBody)
     });
+
+    console.log(`[AI DEBUG] OpenRouter Network Response Status: ${response.status} (${response.statusText})`);
+    
+    if (!response.ok) {
+      const errorPayload = await response.text();
+      console.error(`[AI DEBUG HTTP FAILURE] Status: ${response.status} | Details: ${errorPayload}`);
+      return null;
+    }
+
     const data = await response.json();
-    return data?.choices?.[0]?.message?.content?.trim() || null;
+    console.log(`[AI DEBUG] Response Body parsed successfully. Choice present? ${!!data?.choices?.[0]}`);
+    
+    if (data?.choices?.[0]?.message?.content) {
+      const generatedText = data.choices[0].message.content.trim();
+      console.log(`[AI DEBUG SUCCESS] Character count output: ${generatedText.length}`);
+      return generatedText;
+    } else {
+      console.warn("[AI DEBUG EMPTY RESPONSE] No content found in choices. Raw JSON response payload:", JSON.stringify(data));
+      return null;
+    }
   } catch (err: any) {
-    console.log(`[AI LLM CALL ERROR]: ${err.message}`);
+    console.error(`[AI DEBUG CRITICAL EXCEPTION] Failed to execute HTTP call to OpenRouter: ${err.message}`);
+    if (err.stack) console.error(`[AI DEBUG STACK]: ${err.stack}`);
     return null;
   }
 }
 
 async function generateAuditReportCard(verdict: string, flags: string[]): Promise<string> {
+  console.log(`[AI DEBUG] Initiating generateAuditReportCard for verdict: ${verdict}`);
   const systemPrompt = "You are 'SLA-Warden', a sharp, direct, and slightly witty AI security oracle. Write a 2-sentence summary report card of an agent or wallet security check based on the verdict and flags provided. Be punchy.";
   const userContent = `Verdict: ${verdict}. Telemetry Flags: ${flags.join(", ")}`;
   const summary = await callOpenRouter(systemPrompt, userContent);
@@ -189,14 +229,17 @@ async function generateAuditReportCard(verdict: string, flags: string[]): Promis
 }
 
 async function analyzeReviewsWithAI(reviewsText: string): Promise<{ signal: string }> {
+  console.log("[AI DEBUG] Initiating analyzeReviewsWithAI sentiment audit...");
   const systemPrompt = "You are a risk audit intelligence module. Analyze the following text reviews for an AI agent. Classify the cumulative user sentiment/reliability experience into exactly one of these tokens: positive, negative, or neutral. Return only the token word.";
   const token = await callOpenRouter(systemPrompt, reviewsText);
   const cleanToken = token?.toLowerCase() || "neutral";
   const validToken = ["positive", "negative", "neutral"].includes(cleanToken);
+  console.log(`[AI DEBUG] Review analysis finalized. Clean Token: "${cleanToken}" | Validated: ${validToken}`);
   return { signal: validToken ? cleanToken : "neutral" };
 }
 
 async function generateSimulationExplanationWithAI(revertReason: string, risks: any[], warnings: any[]): Promise<string> {
+  console.log("[AI DEBUG] Initiating generateSimulationExplanationWithAI analysis...");
   const systemPrompt = 
     "You are a smart contract security analysis tool. Explain this EVM transaction simulation output in simple, direct English. " +
     "Translate raw errors like 'ERC20: transfer amount exceeds balance' or security warnings into clear, professional instructions " +
@@ -207,6 +250,7 @@ async function generateSimulationExplanationWithAI(revertReason: string, risks: 
 }
 
 async function generateTriageAuditWithAI(allowances: any[]): Promise<string> {
+  console.log("[AI DEBUG] Initiating generateTriageAuditWithAI allowance analysis...");
   const systemPrompt = 
     "You are a decentralized wallet audit system. Review this wallet's token allowances and spending risk metrics. " +
     "Provide a direct 2-sentence professional breakdown of any critical exposures or high spending risk parameters that could put funds at risk.";
