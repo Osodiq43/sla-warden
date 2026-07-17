@@ -90,7 +90,15 @@ console.error = (...args: any[]) => {
 async function runDiagnosedCommand(label: string, cmd: string): Promise<any> {
   console.log(`[${label}] Executing Shell Command: ${cmd}`);
   try {
-    const { stdout, stderr } = await execAsync(cmd);
+    // Inject custom mapped environment variables into the child process execution context
+    const { stdout, stderr } = await execAsync(cmd, {
+      env: {
+        ...process.env,
+        ONCHAINOS_API_KEY: process.env.OKX_API_KEY,
+        ONCHAINOS_SECRET_KEY: process.env.OKX_SECRET_KEY,
+        ONCHAINOS_PASSPHRASE: process.env.OKX_PASSPHRASE
+      }
+    });
     if (stderr) console.log(`[${label}] SHELL STDERR: ${stderr}`);
     console.log(`[${label}] RAW OUTPUT:\n${stdout}`);
     const parsed = extractJsonFromStdout(stdout);
@@ -546,6 +554,15 @@ wss.on("connection", (ws: WebSocket, request: http.IncomingMessage, clientId: st
 async function runBootDiagnostics() {
   console.log("\n=== SERVER SPIN-UP BOOT DIAGNOSTICS ===");
   await runDiagnosedCommand("BOOT: version", "onchainos --version");
+
+  // Automatically authenticate using the configured OKX_API_KEY if present
+  if (process.env.OKX_API_KEY) {
+    console.log("[BOOT: login] Found API credentials. Attempting automated login...");
+    await runDiagnosedCommand("BOOT: login-action", "onchainos wallet login");
+  } else {
+    console.log("[BOOT: login] No API key present in environment variables.");
+  }
+
   await runDiagnosedCommand("BOOT: wallet-status", "onchainos wallet status");
   console.log("=== SERVER SPIN-UP BOOT DIAGNOSTICS END ===\n");
 }
