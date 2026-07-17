@@ -4,6 +4,7 @@ FROM node:22-slim
 RUN apt-get update && apt-get install -y \
     curl \
     git \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install the official onchainos CLI binary
@@ -22,9 +23,8 @@ COPY tsconfig.json ./
 # Run clean install
 RUN npm ci
 
-# Install platform monitoring runtime dependencies and run diagnostic fix
+# Install platform monitoring runtime dependencies globally
 RUN npm install -g @okxweb3/a2a-node
-RUN npx okx-a2a doctor --fix
 
 # Copy application source code
 COPY . .
@@ -35,5 +35,5 @@ RUN npm run build
 # Render injects its own PORT variable, expose it
 EXPOSE 10000
 
-# Start the application directly without the shell setup hook
-CMD ["npm", "start"]
+# Set the AI provider binding and start the background agent process along with the application
+CMD okx-a2a config provider --provider codex && okx-a2a daemon start --provider codex --no-autostart && npm start
