@@ -26,13 +26,12 @@ const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// Dynamic port resolution for Render, falling back to 8080
 const PORT = Number(process.env.PORT) || 8080;
 
 const activeTransports = new Map<string, SSEServerTransport>();
 const activeServers = new Map<string, Server>();
 const sessionClientIdentifiers = new Map<string, string>(); 
-const sessionPaths = new Map<string, string>(); // Maps sessionId -> mounting endpoint path
+const sessionPaths = new Map<string, string>(); 
 const wsClients = new Map<WebSocket, string>();
 
 const originalConsoleLog = console.log;
@@ -130,7 +129,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Root-level global configuration to avoid sub-router matches stripping req.path
 if (process.env.BYPASS_PAYMENT !== "true") {
   app.use(
     paymentMiddleware(
@@ -289,7 +287,14 @@ async function performCoreTelemetryAudit(targetAgentId: string | null, transacti
     const simFrom = profileResult?.data?.agentWalletAddress || PAY_TO;
 
     if (data && data !== "0x") {
-      const scanCheck = await runDiagnosedCommand("Tx Sandbox", `onchainos security tx-scan --from ${simFrom} --to ${to} --data ${data} --value ${value} --chain ${targetChain}`);
+      // Production fix: assemble value argument cleanly without literal placeholder leaks
+      const valArg = (value && String(value) !== "undefined" && String(value).trim() !== "") 
+        ? `--value ${value}` 
+        : "";
+      
+      const cleanCmd = `onchainos security tx-scan --from ${simFrom} --to ${to} --data ${data} ${valArg} --chain ${targetChain}`.replace(/\s+/g, ' ').trim();
+      
+      const scanCheck = await runDiagnosedCommand("Tx Sandbox", cleanCmd);
       const scanResult = scanCheck.parsed;
       
       const risks = scanResult?.data?.riskItemDetail || [];
@@ -364,8 +369,6 @@ function buildKyaMcpServer(sessionId: string): Server {
   return server;
 }
 
-// ================== ISOLATED A2MCP DIRECT ROUTERS ==================
-
 function buildTriageMcpServer(sessionId: string): Server {
   const server = new Server({ name: "sla-warden-triage", version: "1.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -434,6 +437,8 @@ function buildSimulationMcpServer(sessionId: string): Server {
   return server;
 }
 
+// ================== ISOLATED A2MCP DIRECT ROUTERS ==================
+
 const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: string) => {
   return (req: Request, res: Response) => {
     res.setHeader("Content-Type", "text/event-stream");
@@ -451,7 +456,6 @@ const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: s
     const clientId = req.headers["x-client-id"];
     if (clientId) sessionClientIdentifiers.set(sessionId, String(clientId));
     
-    // Explicitly track endpoints in our session paths registry
     sessionPaths.set(sessionId, endpointPath);
 
     const sessionServer = serverBuilder(sessionId);
@@ -496,7 +500,6 @@ const buildMcpMessageHandler = () => {
   };
 };
 
-// Bind Direct Paths to Express to match RouteRisk's routing pattern perfectly
 app.get("/mcp/kya", buildMcpHandler(buildKyaMcpServer, "/mcp/kya"));
 app.post("/mcp/kya/messages", buildMcpMessageHandler());
 
@@ -506,17 +509,15 @@ app.post("/mcp/triage/messages", buildMcpMessageHandler());
 app.get("/mcp/simulation", buildMcpHandler(buildSimulationMcpServer, "/mcp/simulation"));
 app.post("/mcp/simulation/messages", buildMcpMessageHandler());
 
-// Global Session Diagnostics Endpoint
 app.get("/mcp/active-sessions", (req: Request, res: Response) => {
   const targetId = req.headers["x-client-id"] || req.query.clientId;
-  const targetPath = req.query.path as string; // "/mcp/kya", "/mcp/triage", "/mcp/simulation"
+  const targetPath = req.query.path as string; 
   
   if (targetId) {
     let matchingSessions = Array.from(sessionClientIdentifiers.entries())
       .filter(([_, cid]) => cid === targetId)
       .map(([sid, _]) => sid);
       
-    // Filter active transport endpoints matching the targeted route path
     if (targetPath) {
       matchingSessions = matchingSessions.filter(sid => {
         const storedPath = sessionPaths.get(sid) || "";
