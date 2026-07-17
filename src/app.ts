@@ -1,28 +1,47 @@
 import express from "express";
-import type { Request, Response, NextFunction } from "express";
+import type { Request, Response } from "express";
 import * as dotenv from "dotenv";
 import { exec } from "child_process";
 import { promisify } from "util";
-import { Mppx } from "@okxweb3/mpp";
-import { charge } from "@okxweb3/mpp/evm/server";
-import { SaApiClient } from "@okxweb3/mpp/evm";
-import { extractJsonFromStdout } from "./utils.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
+import { paymentMiddleware, x402ResourceServer } from "@okxweb3/x402-express";
+import { ExactEvmScheme } from "@okxweb3/x402-evm/exact/server";
+import { OKXFacilitatorClient } from "@okxweb3/x402-core";
+import { extractJsonFromStdout } from "./utils.js";
+import { AsyncLocalStorage } from "async_hooks";
 import url from "url";
 
 dotenv.config();
 const execAsync = promisify(exec);
+
+// Local storage thread context to isolate log prints by execution sessions
+const logLocalStorage = new AsyncLocalStorage<{ sessionId: string }>();
+
 const app = express();
 app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 4000;
-const HEARTBEAT_INTERVAL_MS = 3 * 60 * 1000; 
-const AUTOMATION_POLL_INTERVAL_MS = 5 * 60 * 1000;
-
 const AGENT_ID = "5239"; 
+
+// Active Transport & Server Mappings
+const activeTransports = new Map<string, SSEServerTransport>();
+const activeServers = new Map<string, Server>();
+const sessionClientIdentifiers = new Map<string, string>(); // sessionId -> client-id
 const wsClients = new Map<WebSocket, string>();
+
 const originalConsoleLog = console.log;
+const originalConsoleError = console.error;
+
+function safeJsonStringify(obj: any): string {
+  return JSON.stringify(obj, (_, value) =>
+    typeof value === "bigint" ? value.toString() : value
+  , 2);
+}
 
 function broadcastLog(message: string) {
   if (
@@ -33,16 +52,38 @@ function broadcastLog(message: string) {
   ) {
     return;
   }
-  wsClients.forEach((wsClientId, clientWs) => {
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(message);
+
+  const store = logLocalStorage.getStore();
+  if (store) {
+    const activeSessionId = store.sessionId;
+    const targetClientId = sessionClientIdentifiers.get(activeSessionId);
+    
+    if (targetClientId) {
+      wsClients.forEach((wsClientId, clientWs) => {
+        if (wsClientId === targetClientId && clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(message);
+        }
+      });
     }
-  });
+  } else {
+    // Global broadcast fallback if out of dynamic session bounds (e.g. system logs)
+    wsClients.forEach((wsClientId, clientWs) => {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(message);
+      }
+    });
+  }
 }
 
 console.log = (...args: any[]) => {
-  const msg = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
+  const msg = args.map(arg => typeof arg === 'object' ? safeJsonStringify(arg) : String(arg)).join(' ');
   originalConsoleLog.apply(console, args);
+  broadcastLog(msg);
+};
+
+console.error = (...args: any[]) => {
+  const msg = args.map(arg => typeof arg === 'object' ? safeJsonStringify(arg) : String(arg)).join(' ');
+  originalConsoleError.apply(console, args);
   broadcastLog(msg);
 };
 
@@ -59,6 +100,29 @@ async function runDiagnosedCommand(label: string, cmd: string): Promise<any> {
     return { stdout: e.stdout || "", stderr: e.stderr || "", parsed: null, error: e.message };
   }
 }
+
+// ================== X402 PROTOCOL GATEWAY SERVER ==================
+
+const NETWORK = "eip155:196"; // X Layer Mainnet
+const PAY_TO = process.env.PAY_TO_ADDRESS || "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291";
+
+const facilitatorClient = new OKXFacilitatorClient({
+  apiKey: process.env.OKX_API_KEY || "",
+  secretKey: process.env.OKX_SECRET_KEY || "",
+  passphrase: process.env.OKX_PASSPHRASE || "",
+});
+
+const resourceServer = new x402ResourceServer(facilitatorClient);
+resourceServer.register(NETWORK, new ExactEvmScheme()); // Register standard EVM scheme layer
+
+// Normalize payment headers into Express routing pipeline
+app.use((req, res, next) => {
+  const rawSig = req.headers["payment-signature"];
+  if (rawSig && !req.headers["authorization"]) {
+    req.headers["authorization"] = String(rawSig).startsWith("Exact ") ? String(rawSig) : `Exact ${rawSig}`;
+  }
+  next();
+});
 
 // ================== CREATIVE GENIUS REPORT ENGINE ==================
 
@@ -91,97 +155,114 @@ async function generateAuditReportCard(verdict: string, flags: string[]): Promis
 }
 
 async function analyzeReviewsWithAI(reviewsText: string): Promise<{ signal: string }> {
-  if (!process.env.OPENROUTER_API_KEY) {
-    console.log("[AI COGNITION] Skipping classification loop — OPENROUTER_API_KEY is missing.");
-    return { signal: "neutral" };
-  }
-
-  const modelsToTry = ["meta-llama/llama-3.3-70b-instruct:free", "openrouter/free"];
+  if (!process.env.OPENROUTER_API_KEY) return { signal: "neutral" };
 
   try {
-    for (const model of modelsToTry) {
-      console.log(`[AI COGNITION] Dispatching payload data to OpenRouter via model: ${model}`);
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: "system",
-              content: "You are a risk audit intelligence module. Analyze the following text reviews for an AI agent. Classify the cumulative user sentiment/reliability experience into exactly one of these tokens: positive, negative, or neutral. Return only the token word."
-            },
-            { role: "user", content: reviewsText }
-          ]
-        })
-      });
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "meta-llama/llama-3.3-70b-instruct:free",
+        messages: [
+          {
+            role: "system",
+            content: "You are a risk audit intelligence module. Analyze the following text reviews for an AI agent. Classify the cumulative user sentiment/reliability experience into exactly one of these tokens: positive, negative, or neutral. Return only the token word."
+          },
+          { role: "user", content: reviewsText }
+        ]
+      })
+    });
 
-      const aiData = await response.json();
-      if (!response.ok) {
-        console.log(`[AI COGNITION WARNING] Model ${model} failed with status code ${response.status}`);
-        continue;
-      }
-
-      const rawContent = aiData?.choices?.[0]?.message?.content;
-      console.log(`[AI COGNITION RESPONSE]: Raw answer string -> "${rawContent?.trim()}"`);
-      const token = rawContent?.trim().toLowerCase() || "neutral";
-      const validToken = ["positive", "negative", "neutral"].includes(token);
-      return { signal: validToken ? token : "neutral" };
-    }
-    return { signal: "neutral" };
+    const aiData = await response.json();
+    const rawContent = aiData?.choices?.[0]?.message?.content;
+    const token = rawContent?.trim().toLowerCase() || "neutral";
+    const validToken = ["positive", "negative", "neutral"].includes(token);
+    return { signal: validToken ? token : "neutral" };
   } catch (err: any) {
-    console.log(`[AI COGNITION CRITICAL FAILURE]: Network runtime error -> ${err.message}`);
+    console.log(`[AI COGNITION CRITICAL FAILURE]: ${err.message}`);
     return { signal: "neutral" };
   }
 }
 
-// ================== SOFTWARE UTILITY COMMERCE LOOP ==================
+// ================== CORE TELEMETRY AUDIT ENGINE ==================
 
-async function fulfillActiveMarketplaceContracts() {
-  console.log("[COMMERCE ENGINE] Querying assigned active task items (status: 1)...");
-  
-  const activeTasksResult = await runDiagnosedCommand(
-    "POLL ACTIVE", 
-    `onchainos agent tasks --status 1 --agent-id ${AGENT_ID} --chain xlayer`
-  );
+async function performCoreTelemetryAudit(targetAgentId: string | null, transactionPayload: any) {
+  let verdict = "PASS";
+  const flags: string[] = [];
+  const summaryChecks: Record<string, any> = {
+    identity: "skipped",
+    reputation: { score: "-", reviewCount: 0, aiSignal: "neutral" },
+    serviceMatch: "skipped",
+    payloadRisk: "skipped"
+  };
 
-  const activeList = activeTasksResult.parsed?.data?.[0]?.list || activeTasksResult.parsed?.list || [];
-  
-  for (const task of activeList) {
-    const jobId = task.jobId;
-    if (!jobId) continue;
+  const targetChain = transactionPayload?.chain || "xlayer";
+  let profileResult: any = null;
 
-    const contextResult = await runDiagnosedCommand(
-      "FETCH CONTEXT",
-      `onchainos agent common context ${jobId} --role asp --agent-id ${AGENT_ID} --chain xlayer`
-    );
+  if (targetAgentId) {
+    const profileCheck = await runDiagnosedCommand("Identity Scan", `onchainos agent profile ${targetAgentId} --chain ${targetChain}`);
+    profileResult = profileCheck.parsed;
 
-    const rawParams = (contextResult.parsed?.data?.serviceParams || contextResult.parsed?.serviceParams || "").trim();
-    let targetChain = task.chain || "xlayer"; // Extract chain context natively
-
-    let verdict = "PASS";
-    const flags: string[] = [];
-    const summaryChecks: Record<string, any> = { identity: "unknown", reputation: { score: "-", reviewCount: 0 }, accessControl: "clear", assetTriage: "clear" };
-
-    let parsedPayload: any = null;
-    try { parsedPayload = JSON.parse(rawParams); } catch { }
-
-    // Check if the parameter payload itself designates an alternative target chain
-    if (parsedPayload && parsedPayload.chain) {
-      targetChain = parsedPayload.chain;
+    if (!profileResult || !profileResult.ok || !profileResult.data) {
+      verdict = "BLOCK";
+      flags.push("target_agent_id_not_found_in_registry");
+      summaryChecks.identity = "unregistered";
+    } else {
+      const statusLabel = profileResult.data.statusLabel ?? "unknown";
+      if (statusLabel === "active") {
+        summaryChecks.identity = "registered";
+      } else {
+        verdict = "BLOCK";
+        flags.push(`agent_registry_status_not_active_${statusLabel}`);
+        summaryChecks.identity = statusLabel;
+      }
     }
 
-    // --- LOGIC TRACK 1: TRANSACTION & PRE-FLIGHT RISK AUDIT ---
-    if (parsedPayload && parsedPayload.to && parsedPayload.data) {
-      console.log(`[TRACK MATCH] Transaction Payload Sandbox for job ${jobId}`);
-      const scanCheck = await runDiagnosedCommand("SANDBOX: SCAN", `onchainos security tx-scan --from 0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291 --to ${parsedPayload.to} --data ${parsedPayload.data} --value ${parsedPayload.value || "0"} --chain ${targetChain}`);
+    if (verdict !== "BLOCK") {
+      const feedbackCheck = await runDiagnosedCommand("Reputation Scan", `onchainos agent feedback-list --agent-id ${targetAgentId} --page-size 20 --chain ${targetChain}`);
+      const feedbackResult = feedbackCheck.parsed;
+
+      if (feedbackResult && feedbackResult.ok && feedbackResult.data) {
+        const totalCount = feedbackResult.data.totalCount || 0;
+        summaryChecks.reputation.reviewCount = totalCount;
+        summaryChecks.reputation.score = feedbackResult.data.totalScore || "-";
+
+        if (totalCount === 0) {
+          if (verdict !== "BLOCK") verdict = "CAUTION";
+          flags.push("unproven_agent_zero_reviews");
+        } else {
+          const reviewComments = (feedbackResult.data.list || [])
+            .map((r: any) => r.content || "")
+            .filter((c: string) => c.length > 0)
+            .join("\n");
+
+          if (reviewComments.length > 0) {
+            const aiResult = await analyzeReviewsWithAI(reviewComments);
+            summaryChecks.reputation.aiSignal = aiResult.signal;
+            if (aiResult.signal === "negative") {
+              if (verdict !== "BLOCK") verdict = "CAUTION";
+              flags.push("llm_extracted_critical_reliability_concerns");
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (transactionPayload && verdict !== "BLOCK") {
+    const { to, data, value } = transactionPayload;
+    const simFrom = profileResult?.data?.agentWalletAddress || "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291";
+
+    if (data && data !== "0x") {
+      const scanCheck = await runDiagnosedCommand("Tx Sandbox", `onchainos security tx-scan --from ${simFrom} --to ${to} --data ${data} --value ${value} --chain ${targetChain}`);
+      const scanResult = scanCheck.parsed;
       
-      const risks = scanCheck.parsed?.data?.riskItemDetail || [];
-      const warnings = scanCheck.parsed?.data?.warnings || [];
-      const revertReason = scanCheck.parsed?.data?.simulator?.revertReason || "";
+      const risks = scanResult?.data?.riskItemDetail || [];
+      const warnings = scanResult?.data?.warnings || [];
+      const revertReason = scanResult?.data?.simulator?.revertReason || "";
 
       if (risks.length > 0 || warnings.length > 0) {
         verdict = "BLOCK";
@@ -196,231 +277,207 @@ async function fulfillActiveMarketplaceContracts() {
         summaryChecks.payloadRisk = "clear";
         summaryChecks.simulation = "stable";
       }
-    } 
-    // --- LOGIC TRACK 2: WALLET SANCTIONS & HEALTH TRIAGE ---
-    else if (/^0x[a-fA-F0-9]{40}$/.test(rawParams)) {
-      console.log(`[TRACK MATCH] Wallet Security Triage for Target: ${rawParams}`);
-      const approvalScan = await runDiagnosedCommand("TRIAGE: APPROVALS", `onchainos security approvals --address ${rawParams} --chain ${targetChain}`);
-      const balanceScan = await runDiagnosedCommand("TRIAGE: BALANCES", `onchainos portfolio all-balances --address ${rawParams} --chains ${targetChain}`);
+    } else {
+      const triageCheck = await runDiagnosedCommand("Wallet Approvals", `onchainos security approvals --address ${to} --chain ${targetChain}`);
+      const triageResult = triageCheck.parsed;
 
-      const allowances = approvalScan.parsed?.data?.[0]?.dataList || [];
-      const tokenAssets = balanceScan.parsed?.data?.[0]?.tokenAssets || [];
-
-      summaryChecks.identity = "external_wallet_space";
-      summaryChecks.assetTriage = `tracked_assets: ${tokenAssets.length}`;
+      const allowances = triageResult?.data?.[0]?.dataList || [];
+      summaryChecks.payloadRisk = "clear";
+      summaryChecks.simulation = "skipped (no calldata)";
 
       const highRiskAllowances = allowances.filter((a: any) => a.riskLevel > 1);
       if (highRiskAllowances.length > 0) {
-        verdict = "CAUTION";
+        if (verdict !== "BLOCK") verdict = "CAUTION";
         flags.push(`vulnerable_spending_allowances: ${highRiskAllowances.length}`);
       }
-    } 
-    // --- LOGIC TRACK 3: AI AGENT TRUST CHECK / KYA ---
-    else if (/^\d+$/.test(rawParams) || (rawParams && rawParams.toLowerCase().includes("agent"))) {
-      const targetAgentId = rawParams.replace(/\D/g, "");
-      console.log(`[TRACK MATCH] Registry KYA Audit for Agent ID: ${targetAgentId}`);
-
-      const profileLookup = await runDiagnosedCommand("KYA: PROFILE", `onchainos agent profile ${targetAgentId} --chain ${targetChain}`);
-      const feedbackLookup = await runDiagnosedCommand("KYA: REPUTATION", `onchainos agent feedback-list --agent-id ${targetAgentId} --chain ${targetChain}`);
-
-      const registrationStatus = profileLookup.parsed?.data?.statusLabel || "unregistered";
-      const reviewsArray = feedbackLookup.parsed?.data?.list || [];
-
-      summaryChecks.identity = registrationStatus;
-      summaryChecks.reputation.reviewCount = reviewsArray.length;
-      summaryChecks.reputation.score = feedbackLookup.parsed?.data?.totalScore || "—";
-
-      if (registrationStatus !== "active") {
-        verdict = "BLOCK";
-        flags.push(`target_registry_label_is_${registrationStatus}`);
-      } else if (reviewsArray.length === 0) {
-        verdict = "CAUTION";
-        flags.push("unproven_counterparty_zero_marketplace_reviews");
-      } else {
-        const reviewComments = reviewsArray
-          .map((r: any) => r.content || "")
-          .filter((c: string) => c.length > 0)
-          .join("\n");
-
-        if (reviewComments.length > 0) {
-          const aiResult = await analyzeReviewsWithAI(reviewComments);
-          summaryChecks.reputation.aiSignal = aiResult.signal;
-          if (aiResult.signal === "negative") {
-            verdict = "CAUTION";
-            flags.push("llm_extracted_critical_reliability_concerns");
-          }
-        }
-      }
-    } else {
-      verdict = "NEUTRAL";
-      flags.push("unstructured_text_context");
     }
+  }
 
-    const reportCardCommentary = await generateAuditReportCard(verdict, flags);
+  const reportCardCommentary = await generateAuditReportCard(verdict, flags);
 
-    const businessData = {
-      verdict,
-      targetJob: jobId,
-      checks: summaryChecks,
-      flags,
-      wittyAnalysis: reportCardCommentary,
-      reputationNotice: "SLA-Warden complete. If this telemetry mitigated your execution risk, please submit positive feedback using 'onchainos agent feedback-submit'."
-    };
+  return {
+    verdict,
+    targetAgentId: targetAgentId || null,
+    checks: summaryChecks,
+    flags,
+    wittyAnalysis: reportCardCommentary,
+    timestamp: new Date().toISOString(),
+  };
+}
 
-    console.log(`[COMMERCE ENGINE] Delivering finalized telemetry payload for Job ${jobId}`);
-    await runDiagnosedCommand(
-      "SUBMIT DELIVERY",
-      `onchainos agent deliver ${jobId} --agent-id ${AGENT_ID} --deliverable-text "${JSON.stringify(businessData).replace(/"/g, '\\"')}" --chain xlayer`
+// ================== DYNAMIC MCP SERVER BUILDERS ==================
+
+function buildKyaMcpServer(sessionId: string): Server {
+  const server = new Server({ name: "sla-warden-kya", version: "1.0.0" }, { capabilities: { tools: {} } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [{
+      name: "AI Agent Trust Check (KYA)",
+      description: "Automated zero-trust agent registry, reputation audit, and KYA risk check.",
+      inputSchema: {
+        type: "object",
+        properties: { targetAgentId: { type: "string", description: "The registered on-chain platform agent numeric identifier to audit." } },
+        required: ["targetAgentId"]
+      }
+    }]
+  }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (request.params.name !== "AI Agent Trust Check (KYA)") throw new Error("Tool mismatch.");
+    return logLocalStorage.run({ sessionId }, async () => {
+      const args = z.object({ targetAgentId: z.string() }).parse(request.params.arguments);
+      console.log(`[KYA ENGINE EXECUTION] Starting registry trust lookup for ID: ${args.targetAgentId}`);
+      const data = await performCoreTelemetryAudit(args.targetAgentId, null);
+      return { content: [{ type: "text", text: safeJsonStringify(data) }] };
+    });
+  });
+  return server;
+}
+
+function buildTriageMcpServer(sessionId: string): Server {
+  const server = new Server({ name: "sla-warden-triage", version: "1.0.0" }, { capabilities: { tools: {} } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [{
+      name: "Wallet Security Triage",
+      description: "On-chain address triage scanning suite to detect counterparty asset anomalies.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          transactionPayload: {
+            type: "object",
+            properties: { to: { type: "string", description: "The counterparty address or contract to scan for spender vulnerabilities." } },
+            required: ["to"]
+          }
+        },
+        required: ["transactionPayload"]
+      }
+    }]
+  }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (request.params.name !== "Wallet Security Triage") throw new Error("Tool mismatch.");
+    return logLocalStorage.run({ sessionId }, async () => {
+      const args = z.object({ transactionPayload: z.object({ to: z.string() }) }).parse(request.params.arguments);
+      console.log(`[TRIAGE ENGINE EXECUTION] Starting allowance spend health scan for address: ${args.transactionPayload.to}`);
+      const data = await performCoreTelemetryAudit(null, args.transactionPayload);
+      return { content: [{ type: "text", text: safeJsonStringify(data) }] };
+    });
+  });
+  return server;
+}
+
+function buildSimulationMcpServer(sessionId: string): Server {
+  const server = new Server({ name: "sla-warden-simulation", version: "1.0.0" }, { capabilities: { tools: {} } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [{
+      name: "Tx Pre-Flight Simulation",
+      description: "Sandboxed dry-run pre-execution simulation for raw EVM calldata payloads.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          transactionPayload: {
+            type: "object",
+            properties: {
+              to: { type: "string", description: "Target EVM smart contract deployment destination address." },
+              data: { type: "string", description: "Hexadecimal compiled calldata string execution byte payload block." },
+              value: { type: "string", description: "Raw base native token value size integer transfer string." }
+            },
+            required: ["to", "data"]
+          }
+        },
+        required: ["transactionPayload"]
+      }
+    }]
+  }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (request.params.name !== "Tx Pre-Flight Simulation") throw new Error("Tool mismatch.");
+    return logLocalStorage.run({ sessionId }, async () => {
+      const args = z.object({
+        transactionPayload: z.object({ to: z.string(), data: z.string(), value: z.string().optional() })
+      }).parse(request.params.arguments);
+      console.log(`[SIMULATION ENGINE EXECUTION] Dispatching dry-run pre-flight to target contract: ${args.transactionPayload.to}`);
+      const data = await performCoreTelemetryAudit(null, args.transactionPayload);
+      return { content: [{ type: "text", text: safeJsonStringify(data) }] };
+    });
+  });
+  return server;
+}
+
+// ================== ISOLATED A2MCP MOUNT ROUTERS WITH x402 PAYWALLS ==================
+
+const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: string, desc: string) => {
+  const router = express.Router();
+
+  if (process.env.BYPASS_PAYMENT !== "true") {
+    router.use(
+      paymentMiddleware(
+        {
+          [`GET ${endpointPath}`]: {
+            accepts: [{ scheme: "exact", network: NETWORK, payTo: PAY_TO, price: "0" }],
+            description: desc,
+            mimeType: "application/json",
+          },
+        },
+        resourceServer
+      )
     );
   }
-}
 
-async function discoverAndApplyToPublicJobs() {
-  console.log("[COMMERCE ENGINE] Scanning open marketplace listings via task-search...");
-  const searchResult = await runDiagnosedCommand(
-    "MARKET HOVER", 
-    `onchainos agent task-search --agent-id ${AGENT_ID} --status 0 --page-size 30 --chain xlayer`
-  );
+  router.get("/", (req: Request, res: Response) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
 
-  const marketJobs = searchResult.parsed?.data?.tasks || searchResult.parsed?.tasks || [];
-  for (const job of marketJobs) {
-    const title = job.title || "";
-    const jobId = job.jobId;
-    const paymentMode = job.paymentMode;
-    const tokenAmount = job.tokenAmount || "0";
-    const tokenSymbol = job.tokenSymbol || "USDT";
+    const host = req.headers.host || "localhost:4000";
+    const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
+    const messageUrl = `${protocol}://${host}${endpointPath}/messages`;
 
-    if (!jobId) continue;
+    const transport = new SSEServerTransport(messageUrl as any, res as any);
+    const sessionId = transport.sessionId;
 
-    // 1. ESCROW Filtering (paymentMode 1 = ESCROW)
-    if (paymentMode !== 1) {
-      console.log(`[COMMERCE ENGINE] Skipping Job ${jobId} ("${title}") - Non-ESCROW payment mode (${paymentMode})`);
-      continue;
-    }
+    const clientId = req.headers["x-client-id"];
+    if (clientId) sessionClientIdentifiers.set(sessionId, String(clientId));
 
-    const matchesNicheKeywords = 
-      title.toLowerCase().includes("trust") || 
-      title.toLowerCase().includes("kya") || 
-      title.toLowerCase().includes("sanction") || 
-      title.toLowerCase().includes("scam") || 
-      title.toLowerCase().includes("audit") ||
-      title.toLowerCase().includes("wallet");
+    const sessionServer = serverBuilder(sessionId);
+    activeTransports.set(sessionId, transport);
+    activeServers.set(sessionId, sessionServer);
 
-    // 2. Filter by Niche & Apply with Dynamic Bidding parameters
-    if (matchesNicheKeywords) {
-      console.log(`[COMMERCE ENGINE] Auto-applying to ESCROW contract: "${title}" with bid: ${tokenAmount} ${tokenSymbol}`);
-      await runDiagnosedCommand(
-        "SUBMIT APPLICATION",
-        `onchainos agent apply ${jobId} --agent-id ${AGENT_ID} --token-amount ${tokenAmount} --token-symbol ${tokenSymbol} --chain xlayer`
-      );
-    }
-  }
-}
+    logLocalStorage.run({ sessionId }, () => {
+      console.log(`[A2MCP CONNECT] Active Route: ${endpointPath} | Session spawned: ${sessionId}`);
+    });
 
-async function runAutonomousWorkflowPass() {
-  await fulfillActiveMarketplaceContracts();
-  await discoverAndApplyToPublicJobs();
-}
+    sessionServer.connect(transport).catch((error) => {
+      console.error(`Session failed to connect: ${sessionId}`, error);
+      activeTransports.delete(sessionId);
+      activeServers.delete(sessionId);
+      if (clientId) sessionClientIdentifiers.delete(sessionId);
+    });
 
-function initializeAutomationLoops() {
-  runAutonomousWorkflowPass();
-  setInterval(runAutonomousWorkflowPass, AUTOMATION_POLL_INTERVAL_MS);
-}
+    req.on("close", () => {
+      activeTransports.delete(sessionId);
+      activeServers.delete(sessionId);
+      if (clientId) sessionClientIdentifiers.delete(sessionId);
+    });
+  });
 
-// ====================================================================
+  router.post("/messages", (req: Request, res: Response) => {
+    const sessionId = req.query.sessionId as string;
+    logLocalStorage.run({ sessionId }, () => {
+      const transport = activeTransports.get(sessionId);
+      if (transport) {
+        transport.handlePostMessage(req, res, req.body);
+      } else {
+        res.status(400).send("No active session segment found in mapping space.");
+      }
+    });
+  });
 
-async function sendHeartbeat() {
-  const result = await runDiagnosedCommand("HEARTBEAT", "onchainos agent heartbeat --chain-index 196 --chain xlayer");
-  if (result.error) {
-    console.log(`[HEARTBEAT] STATUS: FAILED — Agent may drop to OFFLINE on OKX.AI.`);
-  } else {
-    console.log(`[HEARTBEAT] STATUS: SUCCESS — Reported online at ${new Date().toISOString()}`);
-  }
-}
-
-function startHeartbeatLoop() {
-  sendHeartbeat();
-  setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
-}
-
-async function runBootDiagnostics() {
-  console.log("\n=== SERVER SPIN-UP BOOT DIAGNOSTICS ===");
-  await runDiagnosedCommand("BOOT: version", "onchainos --version");
-  await runDiagnosedCommand("BOOT: wallet-status", "onchainos wallet status");
-  await runDiagnosedCommand("BOOT: agent-profile-test", "onchainos agent profile 5239 --chain xlayer");
-  await runDiagnosedCommand("BOOT: home-config-check", "ls -la ~/.onchainos 2>&1 || echo 'MISSING'");
-  console.log("=== SERVER SPIN-UP BOOT DIAGNOSTICS END ===\n");
-}
-
-const saClient = new SaApiClient({
-  apiKey: process.env.OKX_API_KEY!,
-  secretKey: process.env.OKX_SECRET_KEY!,
-  passphrase: process.env.OKX_PASSPHRASE!,
-  onError: (info) => {
-    console.log(`[SA API ERROR] ${info.method} ${info.path} -> ${info.httpStatus} (${info.code}): ${info.msg}`);
-  },
-});
-
-const mppx = Mppx.create({
-  methods: [charge({ saClient })],
-  realm: "SLA-Warden Production Oracle",
-  secretKey: process.env.MPP_SECRET_KEY!,
-});
-
-const CHARGE_CONFIG = {
-  amount: "0",
-  currency: "0x779ded0c9e1022225f8e0630b35a9b54be713736",
-  recipient: "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291",
-  description: "Counterparty Check - Pre-Trust Verification",
-  methodDetails: { chainId: 196, feePayer: true },
+  return router;
 };
 
-interface VerifyBody {
-  targetAgentId?: string | null;
-  expectedServiceName?: string;
-  expectedServiceType?: string;
-  transactionPayload?: {
-    to: string;
-    data?: string;
-    value?: string;
-    chain?: string;
-  } | null;
-}
+app.use("/mcp/kya", buildMcpHandler(buildKyaMcpServer, "/mcp/kya", "AI Agent Trust Check (KYA) Zero Fee standard service gate"));
+app.use("/mcp/triage", buildMcpHandler(buildTriageMcpServer, "/mcp/triage", "Wallet Security Triage Zero Fee standard service gate"));
+app.use("/mcp/simulation", buildMcpHandler(buildSimulationMcpServer, "/mcp/simulation", "Tx Pre-Flight Simulation Zero Fee standard service gate"));
 
-// ================== REQUEST NORMALIZATION INTERACTION LAYER ==================
-
-function smartNormalizer(body: any): VerifyBody {
-  const normalized: VerifyBody = {
-    targetAgentId: body.targetAgentId ? String(body.targetAgentId).trim() : null,
-    expectedServiceName: body.expectedServiceName || undefined,
-    expectedServiceType: body.expectedServiceType || undefined,
-    transactionPayload: null,
-  };
-
-  // Extract address variants for transactionPayload mapping
-  const rawTx = body.transactionPayload;
-  if (rawTx) {
-    const toAddress = rawTx.to || rawTx.address || rawTx.target;
-    if (toAddress) {
-      let rawData = "0x";
-      if (rawTx.data && typeof rawTx.data === "string" && rawTx.data.trim() !== "") {
-        rawData = rawTx.data.trim();
-      }
-      normalized.transactionPayload = {
-        to: toAddress.trim(),
-        data: rawData,
-        value: rawTx.value ? String(rawTx.value).trim() : "0",
-        chain: rawTx.chain || undefined
-      };
-    }
-  }
-
-  return normalized;
-}
-
-app.get("/health", (req: Request, res: Response) => {
-  return res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() });
-});
+// ================== DEBUG AND LOGIN ANCHOR ROUTING LAYER ==================
 
 app.get("/debug/cli-status", async (req: Request, res: Response) => {
   const providedKey = req.query.key;
@@ -428,17 +485,13 @@ app.get("/debug/cli-status", async (req: Request, res: Response) => {
   
   const versionCheck = await runDiagnosedCommand("DEBUG: version", "onchainos --version");
   const walletCheck = await runDiagnosedCommand("DEBUG: wallet-status", "onchainos wallet status");
-  const profileCheck = await runDiagnosedCommand("DEBUG: agent-profile-test", "onchainos agent profile 5239 --chain xlayer");
   const homeCheck = await runDiagnosedCommand("DEBUG: home-config", "ls -la ~/.onchainos 2>&1 || echo 'MISSING'");
-  const heartbeatCheck = await runDiagnosedCommand("DEBUG: heartbeat-test", "onchainos agent heartbeat --chain-index 196 --chain xlayer");
 
   return res.json({
     binaryPresent: !versionCheck.error,
     versionOutput: versionCheck.stdout || versionCheck.error,
     walletStatus: walletCheck.parsed || walletCheck.error,
-    sampleAgentLookup: profileCheck.parsed || profileCheck.error,
     homeConfigDir: homeCheck.stdout || homeCheck.error,
-    heartbeat: heartbeatCheck.parsed || heartbeatCheck.error,
   });
 });
 
@@ -465,244 +518,12 @@ app.post("/debug/login-submit", async (req: Request, res: Response) => {
   return res.json({ verification: verifyResult.parsed || verifyResult.stdout, currentWalletStatus: statusCheck.parsed || statusCheck.stdout });
 });
 
-app.post("/api/v1/verify", async (req: Request, res: Response) => {
-  console.log(`\n================== [INCOMING API AUDIT REQUEST] ==================`);
-  console.log(`Timestamp: ${new Date().toISOString()}`);
-  console.log(`Parameters Received: ${JSON.stringify(req.body, null, 2)}`);
-
-  // Execute request normalization
-  const normalizedBody = smartNormalizer(req.body);
-  console.log(`Normalized Parameters: ${JSON.stringify(normalizedBody, null, 2)}`);
-
-  const protocol = req.headers["x-forwarded-proto"] || "https";
-  const host = req.headers["host"] || "sla-warden.onrender.com";
-  const fullUrl = `${protocol}://${host}${req.originalUrl}`;
-
-  const webHeaders = new Headers();
-  Object.entries(req.headers).forEach(([k, v]) => {
-    if (v) webHeaders.append(k, Array.isArray(v) ? v.join(", ") : v);
-  });
-
-  const rawSig = req.headers["payment-signature"];
-  if (rawSig && !req.headers["authorization"]) {
-    const formattedSig = String(rawSig).startsWith("Payment ") ? String(rawSig) : `Payment ${rawSig}`;
-    webHeaders.append("authorization", formattedSig);
-  }
-
-  const webRequest = new globalThis.Request(fullUrl, {
-    method: req.method,
-    headers: webHeaders,
-    body: req.method !== "GET" && req.method !== "HEAD" ? JSON.stringify(req.body) : undefined,
-  });
-
-  console.log("[Layer 1] Validating OKX MPP Protocol payment gates...");
-  const result = await mppx.charge(CHARGE_CONFIG)(webRequest);
-
-  if (result.status === 402) {
-    console.log("[Layer 1 STATUS]: Payment missing or invalid. Issuing HTTP 402 Challenge header back to caller.");
-    return res.status(402)
-      .set("WWW-Authenticate", result.challenge.headers.get("WWW-Authenticate")!)
-      .json();
-  }
-  console.log("[Layer 1 Verified] Cryptographic payment cleared.");
-
-  const { targetAgentId, expectedServiceName, expectedServiceType, transactionPayload } = normalizedBody;
-
-  // Enforce loose boundary validation: Must provide at least one of targetAgentId OR transactionPayload
-  if (!targetAgentId && !transactionPayload) {
-    console.log("[INPUT VALIDATION ERROR]: Both targetAgentId and transactionPayload are empty. Dropping request.");
-    return res.status(400).json({ error: "missing_parameter: You must provide either targetAgentId or transactionPayload" });
-  }
-
-  try {
-    let verdict = "PASS";
-    const flags: string[] = [];
-    const summaryChecks: Record<string, any> = {
-      identity: "skipped",
-      reputation: { score: "-", reviewCount: 0, aiSignal: "neutral" },
-      serviceMatch: "skipped",
-      payloadRisk: "skipped"
-    };
-
-    const targetChain = transactionPayload?.chain || "xlayer";
-    let profileResult: any = null;
-
-    // --- SERVICE LAYER 2: IDENTITY REGISTRY SCAN (KYA) ---
-    if (targetAgentId) {
-      console.log(`\n--- [Layer 2: Identity Registry Scan for ID ${targetAgentId}] ---`);
-      const profileCheck = await runDiagnosedCommand("Layer 2", `onchainos agent profile ${targetAgentId} --chain ${targetChain}`);
-      profileResult = profileCheck.parsed;
-      console.log(`[Layer 2 PARSED JSON]: ${JSON.stringify(profileResult, null, 2)}`);
-
-      if (!profileResult || !profileResult.ok || !profileResult.data) {
-        verdict = "BLOCK";
-        flags.push(profileCheck.error ? `cli_execution_failed: ${profileCheck.error}` : "target_agent_id_not_found_in_registry");
-        summaryChecks.identity = "unregistered_or_cli_error";
-      } else {
-        const statusLabel = profileResult.data.statusLabel ?? "unknown";
-        console.log(`[Layer 2 Verification] Target Registration Status Flag -> "${statusLabel}"`);
-        if (statusLabel === "active") {
-          summaryChecks.identity = "registered";
-        } else {
-          verdict = "BLOCK";
-          flags.push(`agent_registry_status_not_active_${statusLabel}`);
-          summaryChecks.identity = statusLabel;
-        }
-      }
-
-      // --- SERVICE LAYER 3: CRYPTOGRAPHIC REPUTATION SCAN ---
-      if (verdict !== "BLOCK") {
-        console.log(`\n--- [Layer 3: Cryptographic Reputation Scan for ID ${targetAgentId}] ---`);
-        const feedbackCheck = await runDiagnosedCommand("Layer 3", `onchainos agent feedback-list --agent-id ${targetAgentId} --page-size 20 --chain ${targetChain}`);
-        const feedbackResult = feedbackCheck.parsed;
-        console.log(`[Layer 3 PARSED JSON]: ${JSON.stringify(feedbackResult, null, 2)}`);
-
-        if (feedbackResult && feedbackResult.ok && feedbackResult.data) {
-          const totalCount = feedbackResult.data.totalCount || 0;
-          summaryChecks.reputation.reviewCount = totalCount;
-          summaryChecks.reputation.score = feedbackResult.data.totalScore || "-";
-
-          if (totalCount === 0) {
-            console.log("[Layer 3 Evaluation] Target agent has 0 historical reviews. Adjusting status to CAUTION.");
-            if (verdict !== "BLOCK") verdict = "CAUTION";
-            flags.push("unproven_agent_zero_reviews");
-          } else {
-            const reviewComments = (feedbackResult.data.list || [])
-              .map((r: any) => r.content || "")
-              .filter((c: string) => c.length > 0)
-              .join("\n");
-
-            console.log(`[Layer 3 Evaluation] Extracted Review Texts:\n"""\n${reviewComments}\n"""`);
-
-            if (reviewComments.length > 0) {
-              const aiResult = await analyzeReviewsWithAI(reviewComments);
-              summaryChecks.reputation.aiSignal = aiResult.signal;
-              console.log(`[Layer 3 Evaluation] Semantic Sentiment Verdict -> [${aiResult.signal.toUpperCase()}]`);
-              if (aiResult.signal === "negative") {
-                if (verdict !== "BLOCK") verdict = "CAUTION";
-                flags.push("llm_extracted_critical_reliability_concerns");
-              }
-            }
-          }
-        } else {
-          flags.push(feedbackCheck.error ? `feedback_lookup_cli_error: ${feedbackCheck.error}` : "feedback_lookup_failed");
-        }
-      }
-
-      // --- SERVICE LAYER 4: SERVICE CAPABILITIES ALIGNMENT CHECK ---
-      if (verdict !== "BLOCK") {
-        console.log(`\n--- [Layer 4: Commercial Capabilities Alignment Check] ---`);
-        const serviceCheck = await runDiagnosedCommand("Layer 4", `onchainos agent service-list --agent-id ${targetAgentId} --chain ${targetChain}`);
-        const serviceResult = serviceCheck.parsed;
-        console.log(`[Layer 4 PARSED JSON]: ${JSON.stringify(serviceResult, null, 2)}`);
-        
-        const registeredServices = serviceResult?.ok && Array.isArray(serviceResult?.data) && serviceResult.data[0]?.list
-          ? serviceResult.data[0].list
-          : [];
-
-        if (registeredServices.length === 0) {
-          if (verdict !== "BLOCK") verdict = "CAUTION";
-          flags.push(serviceCheck.error ? `service_list_cli_error: ${serviceCheck.error}` : "zero_registered_commercial_services_found");
-          summaryChecks.serviceMatch = "no_services_found";
-        } else if (expectedServiceName || expectedServiceType) {
-          console.log(`[Layer 4 Alignment] Filtering for Name match: "${expectedServiceName}" | Type match: "${expectedServiceType}"`);
-          const matchFound = registeredServices.some((svc: any) => {
-            const nameMatch = expectedServiceName ? svc.serviceName?.toLowerCase() === expectedServiceName.toLowerCase() : true;
-            const typeMatch = expectedServiceType ? svc.serviceType?.toLowerCase() === expectedServiceType.toLowerCase() : true;
-            return nameMatch && typeMatch;
-          });
-          if (matchFound) {
-            console.log("[Layer 4 Alignment] Capability alignment verified successfully.");
-            summaryChecks.serviceMatch = "matched";
-          } else {
-            if (verdict !== "BLOCK") verdict = "CAUTION";
-            flags.push("claimed_service_profile_mismatch");
-            summaryChecks.serviceMatch = "mismatch";
-          }
-        } else {
-          summaryChecks.serviceMatch = "unspecified";
-        }
-      }
-    }
-
-    // --- SERVICE LAYER 5: TRANSACTION SAFETY SIMULATION / TRIAGE ---
-    if (transactionPayload && verdict !== "BLOCK") {
-      const { to, data, value } = transactionPayload;
-      
-      // Determine sender context
-      const simFrom = profileResult?.data?.agentWalletAddress || "0xeded37a75f0e0fcfb2f9c84dbbc6c98bf4dc8291";
-
-      if (data && data !== "0x") {
-        // Run full Tx Pre-Flight Simulation
-        console.log(`\n--- [Layer 5: Sandboxed Transaction Safety Simulation] ---`);
-        const scanCheck = await runDiagnosedCommand("Layer 5 Simulation", `onchainos security tx-scan --from ${simFrom} --to ${to} --data ${data} --value ${value} --chain ${targetChain}`);
-        const scanResult = scanCheck.parsed;
-        console.log(`[Layer 5 PARSED JSON]: ${JSON.stringify(scanResult, null, 2)}`);
-        
-        const risks = scanResult?.data?.riskItemDetail || [];
-        const warnings = scanResult?.data?.warnings || [];
-        const revertReason = scanResult?.data?.simulator?.revertReason || "";
-
-        if (risks.length > 0 || warnings.length > 0) {
-          verdict = "BLOCK";
-          flags.push(`security_scan_flagged_risk_items: ${risks.length}`);
-          summaryChecks.payloadRisk = "flagged";
-        } else if (revertReason) {
-          verdict = "BLOCK";
-          flags.push(`simulation_would_revert: ${revertReason}`);
-          summaryChecks.payloadRisk = "clear";
-          summaryChecks.simulation = "would_revert";
-        } else if (scanCheck.error) {
-          flags.push(`tx_scan_cli_error: ${scanCheck.error}`);
-        } else {
-          summaryChecks.payloadRisk = "clear";
-          summaryChecks.simulation = "stable";
-        }
-      } else {
-        // Run Wallet Security Triage instead
-        console.log(`\n--- [Layer 5: Wallet Security Triage for Address ${to}] ---`);
-        const triageCheck = await runDiagnosedCommand("Layer 5 Triage", `onchainos security approvals --address ${to} --chain ${targetChain}`);
-        const triageResult = triageCheck.parsed;
-        console.log(`[Layer 5 PARSED JSON]: ${JSON.stringify(triageResult, null, 2)}`);
-
-        const allowances = triageResult?.data?.[0]?.dataList || [];
-        summaryChecks.payloadRisk = "clear";
-        summaryChecks.simulation = "skipped (no calldata)";
-
-        const highRiskAllowances = allowances.filter((a: any) => a.riskLevel > 1);
-        if (highRiskAllowances.length > 0) {
-          verdict = "CAUTION";
-          flags.push(`vulnerable_spending_allowances: ${highRiskAllowances.length}`);
-        }
-      }
-    }
-
-    const reportCardCommentary = await generateAuditReportCard(verdict, flags);
-
-    const businessData = {
-      verdict,
-      targetAgentId: targetAgentId || null,
-      checks: summaryChecks,
-      flags,
-      wittyAnalysis: reportCardCommentary,
-      timestamp: new Date().toISOString(),
-    };
-
-    console.log(`\n================== [API EVALUATION FINALIZED] ==================`);
-    console.log(`Final Response Payload -> ${JSON.stringify(businessData, null, 2)}`);
-    console.log(`============================================================\n`);
-
-    const webResponse = new globalThis.Response(JSON.stringify(businessData), { status: 200 });
-    const finalizedResponse = result.withReceipt(webResponse);
-    finalizedResponse.headers.forEach((v, k) => res.setHeader(k, v));
-    return res.json(businessData);
-  } catch (err: any) {
-    console.log(`[CRITICAL AUDIT INTERCLUSION FAILURE]: ${err.message}`);
-    return res.status(500).json({ error: "internal_system_error" });
-  }
+app.get("/health", (req: Request, res: Response) => {
+  return res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() });
 });
 
 app.use((req, res) => { res.status(404).json({ error: "endpoint_not_found" }); });
+
 const serverInstance = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
@@ -722,9 +543,14 @@ wss.on("connection", (ws: WebSocket, request: http.IncomingMessage, clientId: st
   ws.on("close", () => wsClients.delete(ws));
 });
 
+async function runBootDiagnostics() {
+  console.log("\n=== SERVER SPIN-UP BOOT DIAGNOSTICS ===");
+  await runDiagnosedCommand("BOOT: version", "onchainos --version");
+  await runDiagnosedCommand("BOOT: wallet-status", "onchainos wallet status");
+  console.log("=== SERVER SPIN-UP BOOT DIAGNOSTICS END ===\n");
+}
+
 serverInstance.listen(PORT, "0.0.0.0", async () => {
-  console.log(`[Counterparty Check] Server active on port ${PORT}`);
+  console.log(`[A2MCP Server] SLA-Warden active with separate routes on port ${PORT}`);
   await runBootDiagnostics();
-  startHeartbeatLoop();
-  initializeAutomationLoops();
 });

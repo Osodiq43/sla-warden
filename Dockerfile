@@ -1,6 +1,6 @@
 FROM node:22-slim
 
-# Install curl, shell prerequisites, and sqlite
+# Install curl, git, and sqlite
 RUN apt-get update && apt-get install -y \
     curl \
     git \
@@ -13,10 +13,6 @@ RUN curl -sSL https://raw.githubusercontent.com/okx/onchainos-skills/main/instal
 # Ensure the binary path is globally accessible
 ENV PATH="/root/.local/bin:${PATH}"
 
-# Create a dummy mock executable for codex to pass okx-a2a path validation checks
-RUN echo '#!/bin/sh\necho "mock codex provider"\nexit 0' > /usr/local/bin/codex && \
-    chmod +x /usr/local/bin/codex
-
 WORKDIR /app
 
 # Explicitly copy configuration files individually
@@ -27,9 +23,6 @@ COPY tsconfig.json ./
 # Run clean install
 RUN npm ci
 
-# Install platform monitoring runtime dependencies globally
-RUN npm install -g @okxweb3/a2a-node
-
 # Copy application source code
 COPY . .
 
@@ -39,5 +32,5 @@ RUN npm run build
 # Render injects its own PORT variable, expose it
 EXPOSE 10000
 
-# Start the daemon process safely in the foreground alongside the application
-CMD okx-a2a daemon start --provider codex --no-autostart && npm start
+# Start the A2MCP Express server directly
+CMD ["npm", "start"]
