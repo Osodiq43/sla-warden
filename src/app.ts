@@ -363,6 +363,8 @@ function buildKyaMcpServer(sessionId: string): Server {
   return server;
 }
 
+// ================== ISOLATED A2MCP DIRECT ROUTERS ==================
+
 function buildTriageMcpServer(sessionId: string): Server {
   const server = new Server({ name: "sla-warden-triage", version: "1.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -430,8 +432,6 @@ function buildSimulationMcpServer(sessionId: string): Server {
   });
   return server;
 }
-
-// ================== ISOLATED A2MCP DIRECT ROUTERS ==================
 
 const buildMcpHandler = (serverBuilder: (sid: string) => Server, endpointPath: string) => {
   return (req: Request, res: Response) => {
@@ -503,12 +503,25 @@ app.post("/mcp/simulation/messages", buildMcpMessageHandler());
 // Global Session Diagnostics Endpoint
 app.get("/mcp/active-sessions", (req: Request, res: Response) => {
   const targetId = req.headers["x-client-id"] || req.query.clientId;
+  const targetPath = req.query.path as string; // "/mcp/kya", "/mcp/triage", "/mcp/simulation"
   
   if (targetId) {
-    const matchingSessions = Array.from(sessionClientIdentifiers.entries())
+    let matchingSessions = Array.from(sessionClientIdentifiers.entries())
       .filter(([_, cid]) => cid === targetId)
       .map(([sid, _]) => sid);
       
+    // Filter active transport endpoints matching the targeted route path
+    if (targetPath) {
+      matchingSessions = matchingSessions.filter(sid => {
+        const transport = activeTransports.get(sid);
+        if (transport) {
+          const reqUrl = (transport as any)._messageUrl || "";
+          return reqUrl.includes(targetPath);
+        }
+        return false;
+      });
+    }
+
     return res.status(200).json({
       activeSessionIds: matchingSessions
     });
