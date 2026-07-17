@@ -156,9 +156,8 @@ if (process.env.BYPASS_PAYMENT !== "true") {
 
 // ================== CREATIVE GENIUS REPORT ENGINE ==================
 
-async function generateAuditReportCard(verdict: string, flags: string[]): Promise<string> {
-  if (!process.env.OPENROUTER_API_KEY) return "Risk Discovery pass complete under localized telemetry constraints.";
-  
+async function callOpenRouter(systemPrompt: string, userContent: string): Promise<string | null> {
+  if (!process.env.OPENROUTER_API_KEY) return null;
   try {
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -169,52 +168,51 @@ async function generateAuditReportCard(verdict: string, flags: string[]): Promis
       body: JSON.stringify({
         model: "meta-llama/llama-3.3-70b-instruct:free",
         messages: [
-          {
-            role: "system",
-            content: "You are 'SLA-Warden', a sharp, direct, and slightly witty AI security oracle. Write a 2-sentence summary report card of an agent or wallet security check based on the verdict and flags provided. Be punchy."
-          },
-          { role: "user", content: `Verdict: ${verdict}. Telemetry Flags: ${flags.join(", ")}` }
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContent }
         ]
       })
     });
     const data = await response.json();
-    return data?.choices?.[0]?.message?.content || "Audit verification complete.";
-  } catch {
-    return "Audit finalized under secure environment bounds.";
+    return data?.choices?.[0]?.message?.content?.trim() || null;
+  } catch (err: any) {
+    console.log(`[AI LLM CALL ERROR]: ${err.message}`);
+    return null;
   }
 }
 
+async function generateAuditReportCard(verdict: string, flags: string[]): Promise<string> {
+  const systemPrompt = "You are 'SLA-Warden', a sharp, direct, and slightly witty AI security oracle. Write a 2-sentence summary report card of an agent or wallet security check based on the verdict and flags provided. Be punchy.";
+  const userContent = `Verdict: ${verdict}. Telemetry Flags: ${flags.join(", ")}`;
+  const summary = await callOpenRouter(systemPrompt, userContent);
+  return summary || "Audit finalized under secure environment bounds.";
+}
+
 async function analyzeReviewsWithAI(reviewsText: string): Promise<{ signal: string }> {
-  if (!process.env.OPENROUTER_API_KEY) return { signal: "neutral" };
+  const systemPrompt = "You are a risk audit intelligence module. Analyze the following text reviews for an AI agent. Classify the cumulative user sentiment/reliability experience into exactly one of these tokens: positive, negative, or neutral. Return only the token word.";
+  const token = await callOpenRouter(systemPrompt, reviewsText);
+  const cleanToken = token?.toLowerCase() || "neutral";
+  const validToken = ["positive", "negative", "neutral"].includes(cleanToken);
+  return { signal: validToken ? cleanToken : "neutral" };
+}
 
-  try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "meta-llama/llama-3.3-70b-instruct:free",
-        messages: [
-          {
-            role: "system",
-            content: "You are a risk audit intelligence module. Analyze the following text reviews for an AI agent. Classify the cumulative user sentiment/reliability experience into exactly one of these tokens: positive, negative, or neutral. Return only the token word."
-          },
-          { role: "user", content: reviewsText }
-        ]
-      })
-    });
+async function generateSimulationExplanationWithAI(revertReason: string, risks: any[], warnings: any[]): Promise<string> {
+  const systemPrompt = 
+    "You are a smart contract security analysis tool. Explain this EVM transaction simulation output in simple, direct English. " +
+    "Translate raw errors like 'ERC20: transfer amount exceeds balance' or security warnings into clear, professional instructions " +
+    "on what went wrong and how the user can fix it. Keep it under 3 sentences.";
+  const userContent = safeJsonStringify({ revertReason, risks, warnings });
+  const explanation = await callOpenRouter(systemPrompt, userContent);
+  return explanation || "Transaction simulation failed. Review your token balances and smart contract parameters before executing.";
+}
 
-    const aiData = await response.json();
-    const rawContent = aiData?.choices?.[0]?.message?.content;
-    const token = rawContent?.trim().toLowerCase() || "neutral";
-    const validToken = ["positive", "negative", "neutral"].includes(token);
-    return { signal: validToken ? token : "neutral" };
-  } catch (err: any) {
-    console.log(`[AI COGNITION CRITICAL FAILURE]: ${err.message}`);
-    return { signal: "neutral" };
-  }
+async function generateTriageAuditWithAI(allowances: any[]): Promise<string> {
+  const systemPrompt = 
+    "You are a decentralized wallet audit system. Review this wallet's token allowances and spending risk metrics. " +
+    "Provide a direct 2-sentence professional breakdown of any critical exposures or high spending risk parameters that could put funds at risk.";
+  const userContent = safeJsonStringify({ allowances });
+  const triageSummary = await callOpenRouter(systemPrompt, userContent);
+  return triageSummary || "Triage completed. No immediate high-risk token exposures detected.";
 }
 
 // ================== CORE TELEMETRY AUDIT ENGINE ==================
@@ -231,6 +229,7 @@ async function performCoreTelemetryAudit(targetAgentId: string | null, transacti
 
   const targetChain = transactionPayload?.chain || "xlayer";
   let profileResult: any = null;
+  let customAiSummary = "";
 
   if (targetAgentId) {
     const profileCheck = await runDiagnosedCommand("Identity Scan", `onchainos agent profile ${targetAgentId} --chain ${targetChain}`);
@@ -287,7 +286,6 @@ async function performCoreTelemetryAudit(targetAgentId: string | null, transacti
     const simFrom = profileResult?.data?.agentWalletAddress || PAY_TO;
 
     if (data && data !== "0x") {
-      // Production fix: assemble value argument cleanly without literal placeholder leaks
       const valArg = (value && String(value) !== "undefined" && String(value).trim() !== "") 
         ? `--value ${value}` 
         : "";
@@ -314,6 +312,9 @@ async function performCoreTelemetryAudit(targetAgentId: string | null, transacti
         summaryChecks.payloadRisk = "clear";
         summaryChecks.simulation = "stable";
       }
+
+      // Execute Simulation-focused AI analysis
+      customAiSummary = await generateSimulationExplanationWithAI(revertReason, risks, warnings);
     } else {
       const triageCheck = await runDiagnosedCommand("Wallet Approvals", `onchainos security approvals --address ${to} --chain ${targetChain}`);
       const triageResult = triageCheck.parsed;
@@ -327,9 +328,13 @@ async function performCoreTelemetryAudit(targetAgentId: string | null, transacti
         if (verdict !== "BLOCK") verdict = "CAUTION";
         flags.push(`vulnerable_spending_allowances: ${highRiskAllowances.length}`);
       }
+
+      // Execute Triage-focused AI analysis
+      customAiSummary = await generateTriageAuditWithAI(allowances);
     }
   }
 
+  // Generate the main witty oracle commentary block
   const reportCardCommentary = await generateAuditReportCard(verdict, flags);
 
   return {
@@ -338,6 +343,7 @@ async function performCoreTelemetryAudit(targetAgentId: string | null, transacti
     checks: summaryChecks,
     flags,
     wittyAnalysis: reportCardCommentary,
+    aiSummary: customAiSummary || undefined,
     timestamp: new Date().toISOString(),
   };
 }
